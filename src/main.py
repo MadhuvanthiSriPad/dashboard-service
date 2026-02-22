@@ -1,4 +1,4 @@
-"""AgentBoard Dashboard Service - FastAPI BFF (Backend for Frontend).
+"""Dashboard Service — FastAPI BFF (Backend for Frontend).
 
 Proxies requests to api-core and billing-service, and serves
 the React frontend static build in production.
@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    version="1.0.0",
+    version=settings.api_version,
     lifespan=lifespan,
 )
 
@@ -89,14 +89,16 @@ def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
     team_id = s.get("team_id", "")
     team_info = team_names.get(team_id, {})
     duration_s = s.get("duration_seconds") or 0
+    usage = s.get("usage", {})
+    billing = s.get("billing", {})
     return {
         "id": s.get("session_id", ""),
         "agent": s.get("agent_name", ""),
         "model": s.get("model", ""),
         "team": team_info.get("name", team_id),
         "status": s.get("status", ""),
-        "total_tokens": (s.get("input_tokens", 0) or 0) + (s.get("output_tokens", 0) or 0),
-        "cost": s.get("total_cost", 0),
+        "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0),
+        "cost": billing.get("total", 0),
         "duration_ms": int(duration_s * 1000) if duration_s else None,
     }
 
