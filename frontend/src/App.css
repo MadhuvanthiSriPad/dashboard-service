@@ -4,10 +4,16 @@
   background: #0f1117;
 }
 
-.app-content {
+.app-layout {
+  display: flex;
+  min-height: calc(100vh - 69px);
+}
+
+.app-main {
+  flex: 1;
   max-width: 1440px;
-  margin: 0 auto;
-  padding: 0 24px 48px;
+  padding: 24px 24px 48px;
+  overflow-y: auto;
 }
 
 /* Stats Cards Grid */
@@ -78,33 +84,19 @@
   }
 }
 
-/* Contract Propagation Section */
-.propagation-section {
-  margin-top: 32px;
-  padding-top: 32px;
-  border-top: 1px solid #2a2d3a;
+/* Empty State */
+.empty-state {
+  text-align: center;
+  padding: 48px 24px;
+  color: #64748b;
+  font-size: 14px;
+  background: #1a1d27;
+  border: 1px solid #2a2d3a;
+  border-radius: 12px;
+  margin-bottom: 24px;
 }
 
-.propagation-header {
-  font-size: 18px;
-  font-weight: 700;
-  color: #f1f5f9;
-  margin-bottom: 20px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  letter-spacing: -0.025em;
-}
-
-.propagation-header-badge {
-  font-size: 11px;
-  font-weight: 500;
-  color: #94a3b8;
-  background: #2a2d3a;
-  padding: 3px 10px;
-  borderRadius: 12px;
-}
-
+/* Contract Propagation */
 .propagation-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -124,6 +116,9 @@
   .bottom-row {
     grid-template-columns: 1fr;
   }
+  .propagation-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 768px) {
@@ -133,7 +128,10 @@
   .charts-row {
     grid-template-columns: 1fr;
   }
-  .app-content {
-    padding: 0 16px 32px;
+  .app-main {
+    padding: 16px 16px 32px;
+  }
+  .app-layout {
+    flex-direction: column;
   }
 }

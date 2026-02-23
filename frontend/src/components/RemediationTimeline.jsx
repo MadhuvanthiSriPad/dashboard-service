@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { GitPullRequest, Clock, CheckCircle2, XCircle, AlertCircle, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
+import { GitPullRequest, Clock, CheckCircle2, XCircle, AlertCircle, Loader2, ChevronDown, ChevronRight, Bot } from '../icons';
 
 const statusConfig = {
   queued: { color: '#64748b', bg: 'rgba(100, 116, 139, 0.15)', icon: Clock, label: 'Queued' },
@@ -86,6 +86,15 @@ const styles = {
     marginTop: '6px',
     fontSize: '12px',
     color: '#3b82f6',
+    textDecoration: 'none',
+  },
+  devinLink: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    marginTop: '6px',
+    fontSize: '12px',
+    color: '#a78bfa',
     textDecoration: 'none',
   },
   timestamp: {
@@ -218,6 +227,17 @@ export default function RemediationTimeline({ jobs }) {
                     {cfg.label}
                   </span>
                 </div>
+                {job.devin_session_url && (
+                  <a
+                    href={job.devin_session_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={styles.devinLink}
+                  >
+                    <Bot size={12} />
+                    Devin Session
+                  </a>
+                )}
                 {job.pr_url && (
                   <a
                     href={job.pr_url}

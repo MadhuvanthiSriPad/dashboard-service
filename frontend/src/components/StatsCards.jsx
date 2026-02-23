@@ -1,5 +1,5 @@
 import React from 'react';
-import { BarChart3, Zap, DollarSign, CheckCircle2 } from 'lucide-react';
+import { BarChart3, Zap, DollarSign, CheckCircle2 } from '../icons';
 
 const cardConfigs = [
   {

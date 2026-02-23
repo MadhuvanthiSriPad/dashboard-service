@@ -1,5 +1,5 @@
 import React from 'react';
-import { Target } from 'lucide-react';
+import { Target } from '../icons';
 
 const styles = {
   container: {

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, RefreshCw } from 'lucide-react';
+import { Activity, RefreshCw } from '../icons';
 
 const styles = {
   header: {
@@ -115,7 +115,7 @@ export default function Header({ lastRefresh, onRefresh }) {
           <div style={styles.logo}>A</div>
           <div>
             <div style={styles.title}>
-              AgentBoard
+              API Core
               <span style={styles.subtitle}> / Dashboard</span>
             </div>
           </div>
