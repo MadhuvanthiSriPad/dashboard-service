@@ -24,9 +24,12 @@ BILLING = settings.billing_url
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the httpx async client lifecycle."""
+    headers = {"X-Caller-Service": "dashboard-service"}
+    if settings.api_core_api_key:
+        headers["X-API-Key"] = settings.api_core_api_key
     app.state.http_client = httpx.AsyncClient(
         timeout=30.0,
-        headers={"X-Caller-Service": "dashboard-service"},
+        headers=headers,
     )
     yield
     await app.state.http_client.aclose()
@@ -165,7 +168,7 @@ async def dashboard(request: Request):
         cost_by_team.append({
             "team": info.get("name", tid),
             "total_cost": t.get("total_cost", 0),
-            "session_count": t.get("sessions", 0),
+            "session_count": t.get("total_sessions", t.get("sessions", 0)),
             "budget": info.get("budget", 0),
         })
 
