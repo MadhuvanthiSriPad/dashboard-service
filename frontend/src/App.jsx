@@ -17,6 +17,8 @@ export default function App() {
   const [activeSection, setActiveSection] = useState('contracts');
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState(new Date());
+  const [contractError, setContractError] = useState('');
+  const [usageError, setUsageError] = useState('');
 
   // ── Contracts section state ───────────────────────────────────────────────
   const [changes, setChanges] = useState([]);
@@ -34,15 +36,16 @@ export default function App() {
 
   // ── Fetch change detail lazily when a row is expanded ─────────────────────
   const fetchChangeDetail = useCallback(async (id) => {
-    if (detailCache[id]) return;                          // already cached
+    if (detailCache[id]) return;
     setLoadingIds(prev => new Set(prev).add(id));
     try {
       const res = await fetch(`/api/contracts/changes/${id}`);
-      if (res.ok) {
-        const data = await res.json();
-        setDetailCache(prev => ({ ...prev, [id]: data }));
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
       }
-    } catch { /* silent */ } finally {
+      const data = await res.json();
+      setDetailCache(prev => ({ ...prev, [id]: data }));
+    } catch { /* keep list visible even when detail fetch fails */ } finally {
       setLoadingIds(prev => {
         const next = new Set(prev);
         next.delete(id);
@@ -53,13 +56,43 @@ export default function App() {
 
   // ── Section fetchers ──────────────────────────────────────────────────────
   const fetchContractData = useCallback(async () => {
+    setContractError('');
     const res = await fetch('/api/contracts/changes?limit=50');
-    if (res.ok) {
-      setChanges(await res.json());
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const changeList = await res.json();
+    setChanges(changeList);
+
+    // Keep contract remediation state live even without row expansion.
+    const topIds = changeList.slice(0, 10).map(c => c.id);
+    if (!topIds.length) {
+      return;
+    }
+    const settled = await Promise.allSettled(
+      topIds.map(id => fetch(`/api/contracts/changes/${id}`))
+    );
+
+    const nextDetails = {};
+    await Promise.all(
+      settled.map(async (result, index) => {
+        if (result.status !== 'fulfilled') return;
+        if (!result.value.ok) return;
+        try {
+          nextDetails[topIds[index]] = await result.value.json();
+        } catch {
+          // Ignore malformed detail payloads and keep remaining cards functional.
+        }
+      })
+    );
+
+    if (Object.keys(nextDetails).length > 0) {
+      setDetailCache(prev => ({ ...prev, ...nextDetails }));
     }
   }, []);
 
   const fetchUsageData = useCallback(async () => {
+    setUsageError('');
     const [dashRes, sessRes, tokenRes, endpointsRes, callersRes] = await Promise.allSettled([
       fetch('/api/dashboard'),
       fetch('/api/sessions'),
@@ -103,7 +136,14 @@ export default function App() {
       } else {
         await fetchUsageData();
       }
-    } catch { /* empty state */ } finally {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      if (activeSection === 'contracts') {
+        setContractError(`Failed to load contract propagation data (${message})`);
+      } else {
+        setUsageError(`Failed to load usage data (${message})`);
+      }
+    } finally {
       setLoading(false);
       setLastRefresh(new Date());
     }
@@ -149,17 +189,29 @@ export default function App() {
 
           {/* ── Section 1: Contract Changes ─────────────────────────────── */}
           {activeSection === 'contracts' && (
-            <ContractChangesList
-              changes={changes}
-              detailCache={detailCache}
-              loadingIds={loadingIds}
-              onExpand={fetchChangeDetail}
-            />
+            <>
+              {contractError && (
+                <div className="empty-state" style={{ color: '#ef4444', borderColor: 'rgba(239, 68, 68, 0.3)' }}>
+                  {contractError}
+                </div>
+              )}
+              <ContractChangesList
+                changes={changes}
+                detailCache={detailCache}
+                loadingIds={loadingIds}
+                onExpand={fetchChangeDetail}
+              />
+            </>
           )}
 
           {/* ── Section 2: API Usage ────────────────────────────────────── */}
           {activeSection === 'usage' && (
             <>
+              {usageError && (
+                <div className="empty-state" style={{ color: '#ef4444', borderColor: 'rgba(239, 68, 68, 0.3)' }}>
+                  {usageError}
+                </div>
+              )}
               <UsageScopePanel
                 routes={topEndpoints}
                 callers={allCallers}
