@@ -17,6 +17,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "completed",
         "priority": "high",
+        "max_cost_usd": 10.0,
         "usage": {"input_tokens": 10000, "output_tokens": 5420, "cached_tokens": 0},
         "billing": {"total": 0.0231},
         "started_at": "2026-02-20T10:00:00+00:00",
@@ -32,6 +33,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "running",
         "priority": "medium",
+        "max_cost_usd": 5.0,
         "usage": {"input_tokens": 5000, "output_tokens": 3200, "cached_tokens": 0},
         "billing": {"total": 0.0164},
         "started_at": "2026-02-20T11:00:00+00:00",
@@ -47,6 +49,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "failed",
         "priority": "low",
+        "max_cost_usd": 2.0,
         "usage": {"input_tokens": 2000, "output_tokens": 1100, "cached_tokens": 0},
         "billing": {"total": 0.0047},
         "started_at": "2026-02-20T12:00:00+00:00",
@@ -107,7 +110,25 @@ def mock_client():
             return _mock_response(MOCK_SESSIONS[0])
         return _mock_response({"detail": "Not found"}, 404)
 
+    async def mock_post(url: str, **kwargs):
+        if "/api/v1/sessions" in url:
+            json_body = kwargs.get("json", {})
+            if "max_cost_usd" not in json_body:
+                return _mock_response(
+                    {"detail": "max_cost_usd is required"}, 422
+                )
+            return _mock_response({
+                "session_id": "sess-new-001",
+                "agent_name": json_body.get("agent_name", ""),
+                "model": json_body.get("model", "gpt-4o"),
+                "team_id": json_body.get("team_id"),
+                "max_cost_usd": json_body["max_cost_usd"],
+                "status": "running",
+            })
+        return _mock_response({"detail": "Not found"}, 404)
+
     client.get = AsyncMock(side_effect=mock_get)
+    client.post = AsyncMock(side_effect=mock_post)
     return client
 
 
@@ -164,6 +185,7 @@ async def test_sessions(transport, mock_client):
     assert session["id"] == "sess-001"
     assert session["agent"] == "code-review-bot"
     assert session["total_tokens"] == 15420  # 10000 + 5420
+    assert session["max_cost_usd"] == 10.0
 
 
 @pytest.mark.asyncio
@@ -201,6 +223,47 @@ async def test_cost_by_team(transport, mock_client):
     # api-core returns cost-by-team as a flat list
     assert len(data) == 3
     assert data[0]["team_id"] == "team-1"
+
+
+@pytest.mark.asyncio
+async def test_create_session(transport, mock_client):
+    """POST /api/sessions should proxy to api-core with max_cost_usd."""
+    app.state.http_client = mock_client
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post("/api/sessions", json={
+            "agent_name": "my-agent",
+            "model": "gpt-4o",
+            "max_cost_usd": 15.0,
+        })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["session_id"] == "sess-new-001"
+    assert data["max_cost_usd"] == 15.0
+    assert data["agent_name"] == "my-agent"
+
+
+@pytest.mark.asyncio
+async def test_create_session_missing_max_cost(transport, mock_client):
+    """POST /api/sessions should reject requests without max_cost_usd."""
+    app.state.http_client = mock_client
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post("/api/sessions", json={
+            "agent_name": "my-agent",
+        })
+    # FastAPI returns 422 for missing required field
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_session_invalid_max_cost(transport, mock_client):
+    """POST /api/sessions should reject max_cost_usd <= 0."""
+    app.state.http_client = mock_client
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post("/api/sessions", json={
+            "agent_name": "my-agent",
+            "max_cost_usd": 0,
+        })
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

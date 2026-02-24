@@ -15,6 +15,7 @@ const COLUMNS = [
   { key: 'status',       label: 'Status' },
   { key: 'total_tokens', label: 'Tokens' },
   { key: 'cost',         label: 'Cost' },
+  { key: 'max_cost_usd', label: 'Max Cost' },
   { key: 'duration_ms',  label: 'Duration' },
 ];
 
@@ -170,6 +171,8 @@ export default function SessionsTable({ sessions }) {
       case 'total_tokens':
         return formatTokens(val);
       case 'cost':
+        return formatCost(val);
+      case 'max_cost_usd':
         return formatCost(val);
       case 'duration_ms':
         return (

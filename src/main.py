@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from src.config import settings
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 GATEWAY = settings.gateway_url
 BILLING = settings.billing_url
+DEFAULT_MAX_COST_USD = settings.default_max_cost_usd
 
 
 @asynccontextmanager
@@ -73,6 +75,25 @@ async def _proxy(client: httpx.AsyncClient, url: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+async def _proxy_post(client: httpx.AsyncClient, url: str, payload: dict):
+    """Proxy a POST request and return JSON, raising HTTPException on failure."""
+    try:
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.ConnectError:
+        logger.warning("Upstream unreachable: %s", url)
+        raise HTTPException(status_code=502, detail=f"Upstream unreachable: {url}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Upstream error: {exc.response.text}",
+        )
+    except Exception as exc:
+        logger.exception("Proxy POST error for %s", url)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 async def _fetch_team_names(client: httpx.AsyncClient) -> dict[str, dict]:
     """Fetch teams from gateway and return a dict keyed by team_id."""
     try:
@@ -85,6 +106,25 @@ async def _fetch_team_names(client: httpx.AsyncClient) -> dict[str, dict]:
     except HTTPException:
         pass
     return {}
+
+
+class CreateSessionRequest(BaseModel):
+    """Request body for creating a new session via POST /api/v1/sessions.
+
+    The upstream api-core now requires ``max_cost_usd`` (added 2026-02-24).
+    """
+
+    agent_name: str
+    model: str = "gpt-4o"
+    team_id: str | None = None
+    max_cost_usd: float = Field(
+        ...,
+        description="Maximum cost in USD allowed for this session. "
+        "Required by api-core as of 2026-02-24.",
+        gt=0,
+    )
+    priority: str = "medium"
+    tags: list[str] | None = None
 
 
 def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
@@ -102,6 +142,7 @@ def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
         "status": s.get("status", ""),
         "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0),
         "cost": billing.get("total", 0),
+        "max_cost_usd": s.get("max_cost_usd"),
         "duration_ms": int(duration_s * 1000) if duration_s else None,
     }
 
@@ -199,6 +240,18 @@ async def list_sessions(request: Request):
     sessions = raw if isinstance(raw, list) else raw.get("sessions", [])
     team_names = await _fetch_team_names(client)
     return {"sessions": [_transform_session(s, team_names) for s in sessions]}
+
+
+@app.post("/api/sessions")
+async def create_session(body: CreateSessionRequest, request: Request):
+    """Create a new session via api-core.
+
+    The upstream ``POST /api/v1/sessions`` endpoint now requires the
+    ``max_cost_usd`` field (breaking change deployed 2026-02-24).
+    """
+    client = _client(request)
+    payload = body.model_dump(exclude_none=True)
+    return await _proxy_post(client, f"{GATEWAY}/api/v1/sessions", payload)
 
 
 @app.get("/api/sessions/{session_id}")
