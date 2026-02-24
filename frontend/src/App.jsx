@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
-import StatsCards from './components/StatsCards';
 import SessionsTable from './components/SessionsTable';
 import CostChart from './components/CostChart';
 import TokenUsageChart from './components/TokenUsageChart';
 import TeamBreakdown from './components/TeamBreakdown';
+import UsageScopePanel from './components/UsageScopePanel';
 import TopEndpointsTable from './components/TopEndpointsTable';
 import TopCallersTable from './components/TopCallersTable';
 import ContractChangesList from './components/ContractChangesList';
@@ -29,6 +29,7 @@ export default function App() {
   const [tokenUsage, setTokenUsage] = useState([]);
   const [topEndpoints, setTopEndpoints] = useState([]);
   const [topCallers, setTopCallers] = useState([]);
+  const [allCallers, setAllCallers] = useState([]);
   const [selectedRoute, setSelectedRoute] = useState(null);
 
   // ── Fetch change detail lazily when a row is expanded ─────────────────────
@@ -59,11 +60,12 @@ export default function App() {
   }, []);
 
   const fetchUsageData = useCallback(async () => {
-    const [dashRes, sessRes, tokenRes, endpointsRes] = await Promise.allSettled([
+    const [dashRes, sessRes, tokenRes, endpointsRes, callersRes] = await Promise.allSettled([
       fetch('/api/dashboard'),
       fetch('/api/sessions'),
       fetch('/api/analytics/token-usage'),
       fetch('/api/usage/top-routes'),
+      fetch('/api/usage/top-callers'),
     ]);
 
     if (dashRes.status === 'fulfilled' && dashRes.value.ok) {
@@ -80,6 +82,18 @@ export default function App() {
     if (endpointsRes.status === 'fulfilled' && endpointsRes.value.ok) {
       setTopEndpoints(await endpointsRes.value.json());
     }
+    if (callersRes.status === 'fulfilled' && callersRes.value.ok) {
+      setAllCallers(await callersRes.value.json());
+    }
+  }, []);
+
+  // Top callers on route select (usage section)
+  const handleSelectRoute = useCallback(async (route) => {
+    setSelectedRoute(route);
+    try {
+      const res = await fetch(`/api/usage/top-callers?route=${encodeURIComponent(route)}`);
+      if (res.ok) setTopCallers(await res.json());
+    } catch { /* silent */ }
   }, []);
 
   const fetchData = useCallback(async () => {
@@ -94,15 +108,6 @@ export default function App() {
       setLastRefresh(new Date());
     }
   }, [activeSection, fetchContractData, fetchUsageData]);
-
-  // Top callers on route select (usage section)
-  const handleSelectRoute = useCallback(async (route) => {
-    setSelectedRoute(route);
-    try {
-      const res = await fetch(`/api/usage/top-callers?route=${encodeURIComponent(route)}`);
-      if (res.ok) setTopCallers(await res.json());
-    } catch { /* silent */ }
-  }, []);
 
   // Reset loading when section changes and re-fetch
   const handleSectionChange = useCallback((section) => {
@@ -133,7 +138,6 @@ export default function App() {
     );
   }
 
-  const stats = dashboardData?.stats || null;
   const costByTeam = dashboardData?.cost_by_team || [];
 
   return (
@@ -156,11 +160,12 @@ export default function App() {
           {/* ── Section 2: API Usage ────────────────────────────────────── */}
           {activeSection === 'usage' && (
             <>
-              {stats ? (
-                <StatsCards stats={stats} />
-              ) : (
-                <div className="empty-state">No dashboard stats available</div>
-              )}
+              <UsageScopePanel
+                routes={topEndpoints}
+                callers={allCallers}
+                selectedRoute={selectedRoute}
+                selectedRouteCallers={topCallers}
+              />
 
               {/* Charts */}
               {(tokenUsage.length > 0 || costByTeam.length > 0) && (

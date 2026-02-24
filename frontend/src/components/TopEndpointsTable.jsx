@@ -107,7 +107,6 @@ export default function TopEndpointsTable({ data, onSelectRoute }) {
           <tr>
             <th style={styles.th}>Method</th>
             <th style={styles.th}>Route</th>
-            <th style={{ ...styles.th, textAlign: 'right' }}>Calls</th>
             <th style={{ ...styles.th, textAlign: 'right' }}>Callers</th>
             <th style={{ ...styles.th, textAlign: 'right' }}>Avg (ms)</th>
           </tr>
@@ -129,9 +128,6 @@ export default function TopEndpointsTable({ data, onSelectRoute }) {
                   </span>
                 </td>
                 <td style={{ ...styles.td, ...styles.route }}>{row.route_template}</td>
-                <td style={{ ...styles.td, textAlign: 'right', fontWeight: 600 }}>
-                  {row.total_calls.toLocaleString()}
-                </td>
                 <td style={{ ...styles.td, textAlign: 'right' }}>{row.unique_callers}</td>
                 <td style={{ ...styles.td, textAlign: 'right', color: '#94a3b8' }}>
                   {row.avg_duration_ms.toFixed(1)}
