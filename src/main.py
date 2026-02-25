@@ -94,14 +94,16 @@ def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
     duration_s = s.get("duration_seconds") or 0
     usage = s.get("usage", {})
     billing = s.get("billing", {})
+    cached_tokens = usage.get("cache_read_tokens", usage.get("cached_tokens", 0)) or 0
+    total_cost = billing.get("total_usd", billing.get("total", 0))
     return {
         "id": s.get("session_id", ""),
         "agent": s.get("agent_name", ""),
         "model": s.get("model", ""),
         "team": team_info.get("name", team_id),
         "status": s.get("status", ""),
-        "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0) + (usage.get("cache_read_tokens", 0) or 0),
-        "cost": billing.get("total_usd", 0),
+        "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0) + cached_tokens,
+        "cost": total_cost,
         "duration_ms": int(duration_s * 1000) if duration_s else None,
     }
 
