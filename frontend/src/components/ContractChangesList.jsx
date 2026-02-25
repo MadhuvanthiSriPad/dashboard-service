@@ -53,6 +53,10 @@ function shortRepo(targetRepo) {
   return targetRepo.split('/').pop() || targetRepo;
 }
 
+function uniq(values) {
+  return [...new Set((values || []).filter(Boolean))];
+}
+
 // ── Job row ──────────────────────────────────────────────────────────────────
 
 function JobRow({ job }) {
@@ -174,6 +178,24 @@ function ChangeRow({ change, detail, loadingDetail, onExpand }) {
   const rem = remediationConfig[change.remediation_status] || remediationConfig.pending;
   const summary = parseSummary(change.summary_json);
   const routes = parseRoutes(change.changed_routes_json);
+  const impactedServices = uniq(
+    change.impacted_services?.length
+      ? change.impacted_services
+      : detail?.impact_sets?.map((imp) => imp.caller_service)
+  );
+  const targetRepos = uniq(
+    change.target_repos?.length
+      ? change.target_repos
+      : detail?.remediation_jobs?.map((job) => job.target_repo)
+  );
+  const prUrls = uniq(
+    (detail?.remediation_jobs || []).map((job) => job.pr_url)
+  );
+  const sessionUrls = uniq(
+    (detail?.remediation_jobs || []).map((job) => (
+      job.devin_session_url || (job.devin_run_id ? `${DEVIN_APP_BASE}/sessions/${job.devin_run_id}` : null)
+    ))
+  );
 
   const handleToggle = () => {
     const next = !expanded;
@@ -245,6 +267,13 @@ function ChangeRow({ change, detail, loadingDetail, onExpand }) {
                 {change.head_ref}
               </span>
             )}
+
+            <span style={{
+              fontSize: '10px', color: '#94a3b8',
+              background: '#2a2d3a', padding: '1px 6px', borderRadius: '4px',
+            }}>
+              source: {change.source_repo || 'api-core'}
+            </span>
           </div>
 
           {/* Summary */}
@@ -260,10 +289,55 @@ function ChangeRow({ change, detail, loadingDetail, onExpand }) {
           <div style={{ marginTop: '6px', display: 'flex', gap: '14px', fontSize: '11px', color: '#64748b' }}>
             <span>{change.affected_services} service{change.affected_services !== 1 ? 's' : ''} affected</span>
             {routes.length > 0 && <span>{routes.length} route{routes.length !== 1 ? 's' : ''} changed</span>}
+            {typeof change.active_jobs === 'number' && <span>{change.active_jobs} active Devin job{change.active_jobs !== 1 ? 's' : ''}</span>}
+            {typeof change.pr_count === 'number' && <span>{change.pr_count} PR{change.pr_count !== 1 ? 's' : ''}</span>}
             {change.is_breaking && (
               <span style={{ color: '#ef4444' }}>Breaking</span>
             )}
           </div>
+
+          {(prUrls.length > 0 || sessionUrls.length > 0) && (
+            <div style={{ marginTop: '8px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+              {sessionUrls.length > 0 && (
+                <a
+                  href={sessionUrls[0]}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: '#a78bfa',
+                    textDecoration: 'none',
+                    border: '1px solid rgba(167,139,250,0.3)',
+                    background: 'rgba(167,139,250,0.1)',
+                    borderRadius: '999px',
+                    padding: '3px 8px',
+                  }}
+                >
+                  Devin Session{sessionUrls.length > 1 ? ` (+${sessionUrls.length - 1})` : ''}
+                </a>
+              )}
+              {prUrls.length > 0 && (
+                <a
+                  href={prUrls[0]}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: '#60a5fa',
+                    textDecoration: 'none',
+                    border: '1px solid rgba(96,165,250,0.3)',
+                    background: 'rgba(96,165,250,0.1)',
+                    borderRadius: '999px',
+                    padding: '3px 8px',
+                  }}
+                >
+                  Open PR{prUrls.length > 1 ? ` (+${prUrls.length - 1})` : ''}
+                </a>
+              )}
+            </div>
+          )}
         </div>
       </button>
 
@@ -274,6 +348,60 @@ function ChangeRow({ change, detail, loadingDetail, onExpand }) {
           padding: '14px 16px',
           background: '#13151e',
         }}>
+          {/* Impacted services */}
+          {impactedServices.length > 0 && (
+            <div style={{ marginBottom: '14px' }}>
+              <div style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Impacted Services
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {impactedServices.map((service) => (
+                  <span
+                    key={service}
+                    style={{
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      color: '#a5b4fc',
+                      background: 'rgba(99,102,241,0.14)',
+                      border: '1px solid rgba(99,102,241,0.3)',
+                      borderRadius: '999px',
+                      padding: '4px 10px',
+                    }}
+                  >
+                    {service}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Target repos */}
+          {targetRepos.length > 0 && (
+            <div style={{ marginBottom: '14px' }}>
+              <div style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Target Repositories
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {targetRepos.map((repo) => (
+                  <span
+                    key={repo}
+                    style={{
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      color: '#e2e8f0',
+                      background: '#0f1117',
+                      border: '1px solid #2a2d3a',
+                      borderRadius: '6px',
+                      padding: '4px 10px',
+                    }}
+                  >
+                    {shortRepo(repo)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Changed routes */}
           {routes.length > 0 && (
             <div style={{ marginBottom: '14px' }}>
@@ -353,7 +481,7 @@ export default function ContractChangesList({ changes, detailCache, loadingIds, 
 
       {changes.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '40px', color: '#64748b', fontSize: '13px' }}>
-          No contract changes detected
+          No contract changes detected yet.
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
