@@ -5,3 +5,4 @@ __pycache__/
 dist/
 node_modules/
 .venv
+frontend/package-lock.json
