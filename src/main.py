@@ -100,7 +100,7 @@ def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
         "model": s.get("model", ""),
         "team": team_info.get("name", team_id),
         "status": s.get("status", ""),
-        "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0),
+        "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0) + (usage.get("cache_read_tokens", 0) or 0),
         "cost": billing.get("total_usd", 0),
         "duration_ms": int(duration_s * 1000) if duration_s else None,
     }
@@ -127,7 +127,7 @@ async def dashboard(request: Request):
     billing_data = {}
 
     try:
-        sessions_data = await _proxy(client, f"{GATEWAY}/api/v1/sessions")
+        sessions_data = await _proxy(client, f"{GATEWAY}/api/v1/sessions?max_cost_usd={settings.default_max_cost_usd}")
     except HTTPException:
         sessions_data = []
 
@@ -195,7 +195,7 @@ async def dashboard(request: Request):
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     client = _client(request)
-    raw = await _proxy(client, f"{GATEWAY}/api/v1/sessions")
+    raw = await _proxy(client, f"{GATEWAY}/api/v1/sessions?max_cost_usd={settings.default_max_cost_usd}")
     sessions = raw if isinstance(raw, list) else raw.get("sessions", [])
     team_names = await _fetch_team_names(client)
     return {"sessions": [_transform_session(s, team_names) for s in sessions]}
@@ -204,7 +204,7 @@ async def list_sessions(request: Request):
 @app.get("/api/sessions/{session_id}")
 async def get_session(session_id: str, request: Request):
     return await _proxy(
-        _client(request), f"{GATEWAY}/api/v1/sessions/{session_id}"
+        _client(request), f"{GATEWAY}/api/v1/sessions/{session_id}?max_cost_usd={settings.default_max_cost_usd}"
     )
 
 
@@ -277,7 +277,10 @@ async def contracts_current(request: Request):
 
 
 @app.get("/api/contracts/changes")
-async def contracts_changes(request: Request, limit: int = 20):
+async def contracts_changes(
+    request: Request,
+    limit: int = 20,
+):
     return await _proxy(
         _client(request),
         f"{GATEWAY}/api/v1/contracts/changes?limit={limit}",
@@ -290,6 +293,29 @@ async def contracts_change_detail(change_id: int, request: Request):
         _client(request),
         f"{GATEWAY}/api/v1/contracts/changes/{change_id}",
     )
+
+
+@app.post("/api/contracts/live-jobs/sync")
+async def contracts_live_jobs_sync(
+    request: Request,
+    limit: int = 50,
+    include_terminal: bool = True,
+):
+    sync_flag = "true" if include_terminal else "false"
+    try:
+        resp = await _client(request).post(
+            f"{GATEWAY}/api/v1/contracts/live-jobs/sync?limit={limit}&include_terminal={sync_flag}"
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.ConnectError:
+        logger.warning("Upstream unreachable: %s", GATEWAY)
+        raise HTTPException(status_code=502, detail=f"Upstream unreachable: {GATEWAY}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Upstream error: {exc.response.text}",
+        )
 
 
 # ── Static file serving (production) ────────────────────────────────────────
