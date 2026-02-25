@@ -100,8 +100,8 @@ def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
         "model": s.get("model", ""),
         "team": team_info.get("name", team_id),
         "status": s.get("status", ""),
-        "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0) + (usage.get("cached_tokens", 0) or 0),
-        "cost": billing.get("total", 0),
+        "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0) + (usage.get("cache_read_tokens", 0) or 0),
+        "cost": billing.get("total_usd", 0),
         "duration_ms": int(duration_s * 1000) if duration_s else None,
     }
 
@@ -127,7 +127,7 @@ async def dashboard(request: Request):
     billing_data = {}
 
     try:
-        sessions_data = await _proxy(client, f"{GATEWAY}/api/v1/sessions")
+        sessions_data = await _proxy(client, f"{GATEWAY}/api/v1/sessions?max_cost_usd={settings.default_max_cost_usd}")
     except HTTPException:
         sessions_data = []
 
@@ -195,7 +195,7 @@ async def dashboard(request: Request):
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     client = _client(request)
-    raw = await _proxy(client, f"{GATEWAY}/api/v1/sessions")
+    raw = await _proxy(client, f"{GATEWAY}/api/v1/sessions?max_cost_usd={settings.default_max_cost_usd}")
     sessions = raw if isinstance(raw, list) else raw.get("sessions", [])
     team_names = await _fetch_team_names(client)
     return {"sessions": [_transform_session(s, team_names) for s in sessions]}
@@ -204,7 +204,7 @@ async def list_sessions(request: Request):
 @app.get("/api/sessions/{session_id}")
 async def get_session(session_id: str, request: Request):
     return await _proxy(
-        _client(request), f"{GATEWAY}/api/v1/sessions/{session_id}"
+        _client(request), f"{GATEWAY}/api/v1/sessions/{session_id}?max_cost_usd={settings.default_max_cost_usd}"
     )
 
 
