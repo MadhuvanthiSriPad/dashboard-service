@@ -93,7 +93,10 @@ export default function BlastRadiusList({ impactSets }) {
       byService[s.caller_service] = { totalCalls: 0, routes: [] };
     }
     byService[s.caller_service].totalCalls += s.calls_last_7d;
-    byService[s.caller_service].routes.push(s.route_template);
+    byService[s.caller_service].routes.push({
+      method: s.method || null,
+      route: s.route_template,
+    });
   });
 
   const entries = Object.entries(byService).sort((a, b) => b[1].totalCalls - a[1].totalCalls);
@@ -110,7 +113,12 @@ export default function BlastRadiusList({ impactSets }) {
           <div style={styles.serviceName}>
             {service}
             <div style={styles.route}>
-              {info.routes.length} route{info.routes.length > 1 ? 's' : ''} affected
+              {info.routes.map((r, idx) => (
+                <div key={idx}>
+                  {r.method ? <span style={{ color: '#a5b4fc', fontWeight: 600 }}>{r.method.toUpperCase()} </span> : null}
+                  {r.route}
+                </div>
+              ))}
             </div>
           </div>
           <div style={styles.barOuter}>
