@@ -376,9 +376,21 @@ async def contracts_live_jobs_sync(
         logger.warning("Upstream unreachable: %s", GATEWAY)
         raise HTTPException(status_code=502, detail=f"Upstream unreachable: {GATEWAY}")
     except httpx.HTTPStatusError as exc:
+        try:
+            payload = exc.response.json()
+        except ValueError:
+            payload = None
+        detail = payload.get("detail") if isinstance(payload, dict) and "detail" in payload else (
+            payload if payload is not None else f"Upstream error: {exc.response.text}"
+        )
+        headers = {}
+        retry_after = exc.response.headers.get("Retry-After")
+        if retry_after:
+            headers["Retry-After"] = retry_after
         raise HTTPException(
             status_code=exc.response.status_code,
-            detail=f"Upstream error: {exc.response.text}",
+            detail=detail,
+            headers=headers or None,
         )
 
 

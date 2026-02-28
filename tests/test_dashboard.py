@@ -217,3 +217,40 @@ async def test_dashboard_with_upstream_failure(transport):
     assert data["stats"]["total_sessions"] == 0
     assert data["stats"]["active_sessions"] == 0
     assert data["cost_by_team"] == []
+
+
+@pytest.mark.asyncio
+async def test_live_jobs_sync_preserves_cooldown_payload(transport):
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 429
+    mock_resp.json.return_value = {
+        "detail": {
+            "kind": "sync_cooldown",
+            "message": "Sync cooldown: retry in 27s",
+            "retry_after_seconds": 27,
+        }
+    }
+    mock_resp.text = '{"detail":{"kind":"sync_cooldown","message":"Sync cooldown: retry in 27s","retry_after_seconds":27}}'
+    mock_resp.headers = {"Retry-After": "27"}
+    mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "cooldown",
+        request=MagicMock(),
+        response=mock_resp,
+    )
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.post = AsyncMock(return_value=mock_resp)
+    app.state.http_client = client
+
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post("/api/contracts/live-jobs/sync")
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "27"
+    assert resp.json() == {
+        "detail": {
+            "kind": "sync_cooldown",
+            "message": "Sync cooldown: retry in 27s",
+            "retry_after_seconds": 27,
+        }
+    }

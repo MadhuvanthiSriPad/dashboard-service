@@ -42,6 +42,7 @@ const PIPE = [
   { key: "dispatch", label: "Dispatch", desc: "Agent launch" },
   { key: "fix",      label: "Fix",      desc: "Code changes" },
   { key: "verify",   label: "Verify",   desc: "CI + review" },
+  { key: "notify",   label: "Notify",   desc: "Stakeholder alert" },
 ];
 const NAV = [
   { group: "Platform", items: [
@@ -49,7 +50,6 @@ const NAV = [
   ]},
   { group: "Contract Recovery", items: [
     { id: "blast", label: "Blast Radius" },
-    { id: "jobs", label: "Remediation Jobs" },
     { id: "topology", label: "Service Topology" },
   ]},
   { group: "Observability", items: [
@@ -107,28 +107,78 @@ function rn(u) { if (!u) return "unknown"; return u.replace(/\.git$/, "").split(
 function rel(iso) { if (!iso) return ""; const ms = Date.now() - new Date(iso).getTime(); if (ms < 0) return "now"; const s = Math.floor(ms / 1000); if (s < 60) return `${s}s ago`; const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`; const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`; return `${Math.floor(h / 24)}d ago` }
 function fmt(iso) { if (!iso) return "n/a"; return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) }
 function jobFor(jobs, g, svc) { if (!g?.services?.[svc]) return null; const repo = g.services[svc].repo; return jobs.find(j => j.target_repo === repo || rn(j.target_repo) === svc) || null }
+function parseSyncResponse(payload) {
+  const detail = payload?.detail ?? payload;
+  if (detail && typeof detail === "object") {
+    const message = detail.message || detail.error || "Sync temporarily unavailable";
+    const retryAfter = Number(detail.retry_after_seconds);
+    return { message, retryAfter: Number.isFinite(retryAfter) ? retryAfter : null, kind: detail.kind || null };
+  }
+  const message = typeof detail === "string" && detail.trim() ? detail : "Sync temporarily unavailable";
+  const match = message.match(/retry in (\d+)s/i);
+  return { message, retryAfter: match ? Number(match[1]) : null, kind: null };
+}
+function hasNotificationSignal(detail, jobs) {
+  const auditEntries = jobs.flatMap(j => Array.isArray(j.audit_entries) ? j.audit_entries : []);
+  return auditEntries.some(entry => {
+    const detailText = String(entry?.detail || "").toLowerCase();
+    const statusText = String(entry?.new_status || "").toLowerCase();
+    return detailText.includes("notify")
+      || detailText.includes("notification")
+      || statusText.includes("notify")
+      || statusText.includes("notification");
+  }) || Boolean(detail?.notification_sent_at);
+}
 function pipeStatus(d, jobs) {
-  if (!d) return PIPE.map(s => ({ ...s, status: "waiting" }));
-  const has = jobs.length > 0, allG = has && jobs.every(j => j.status === "green");
-  const allPR = has && jobs.every(j => j.pr_url);
-  // Determine single current stage
+  if (!d) return PIPE.map(s => ({ ...s, status: "waiting", statusText: "" }));
+  const has = jobs.length > 0;
+  const allG = has && jobs.every(j => j.status === "green");
+  const anyQueued = has && jobs.some(j => j.status === "queued");
+  const anyRunning = has && jobs.some(j => j.status === "running");
+  const anyCIFailed = has && jobs.some(j => j.status === "ci_failed");
+  const anyNeedsHuman = has && jobs.some(j => j.status === "needs_human");
+  const anyVerificationSignal = has && jobs.some(j => j.pr_url || ["pr_opened", "ci_failed", "needs_human", "green"].includes(j.status));
+  const notificationSent = hasNotificationSignal(d, jobs);
+  const prCount = jobs.filter(j => j.pr_url).length;
+  const greenCount = jobs.filter(j => j.status === "green").length;
+  const runningCount = jobs.filter(j => j.status === "running").length;
+  const queuedCount = jobs.filter(j => j.status === "queued").length;
+  // Determine single current stage from live job state.
   let current;
-  if (allG) current = "verify";
-  else if (allPR) current = "verify";
-  else if (has) current = "fix";
+  if (notificationSent) current = "notify";
+  else if (allG) current = "notify";
+  else if (anyVerificationSignal) current = "verify";
+  else if (anyRunning || anyQueued) current = "fix";
+  else if (has) current = "dispatch";
   else if (d) current = "dispatch";
   else current = "analyze";
-  // Everything before current = done, current = active, after = waiting
-  const order = PIPE.map(s => s.key);
-  const ci = order.indexOf(current);
+  // Build dynamic status text per stage — only show when there's real data
+  const statusTexts = {
+    detect: d?.changed_routes?.length > 0 || d?.changed_routes_json ? "Change found" : d ? "Detected" : "",
+    analyze: d?.affected_services > 0 ? `${d.affected_services} impacted` : "",
+    plan: d?.impact_sets?.length > 0 ? `${d.impact_sets.length} wave${d.impact_sets.length !== 1 ? "s" : ""}` : "",
+    dispatch: has ? `${jobs.length} job${jobs.length !== 1 ? "s" : ""} launched` : "",
+    fix: has
+      ? (anyRunning ? `${runningCount} running` : anyQueued ? `${queuedCount} queued` : prCount > 0 ? `${prCount} PR${prCount !== 1 ? "s" : ""} open` : "")
+      : "",
+    verify: allG ? "All green" : (anyNeedsHuman ? "Needs review" : anyCIFailed ? "CI failed" : greenCount > 0 ? `${greenCount}/${jobs.length} passed` : prCount > 0 ? `${prCount} in review` : ""),
+    notify: notificationSent ? "Sent" : allG ? "Pending send" : "",
+  };
   return PIPE.map((s, i) => {
-    // detect + plan are always done once we have a change
-    if (s.key === "detect" || s.key === "plan") return { ...s, status: "done" };
-    // verify is only done when all jobs are green
-    if (s.key === "verify" && allG) return { ...s, status: "done" };
-    if (i < ci) return { ...s, status: "done" };
-    if (i === ci) return { ...s, status: allG && s.key === "verify" ? "done" : "active" };
-    return { ...s, status: "waiting" };
+    const statusText = statusTexts[s.key] || "";
+    const done =
+      (s.key === "detect" && Boolean(d)) ||
+      (s.key === "analyze" && (Boolean(d?.affected_services) || Boolean(d?.impact_sets?.length) || has)) ||
+      (s.key === "plan" && (Boolean(d?.impact_sets?.length) || has)) ||
+      (s.key === "dispatch" && has) ||
+      (s.key === "fix" && has && !anyQueued && !anyRunning && anyVerificationSignal) ||
+      (s.key === "verify" && allG) ||
+      (s.key === "notify" && notificationSent);
+
+    if (done) return { ...s, status: "done", statusText };
+    if (s.key === current) return { ...s, status: "active", statusText };
+    const order = PIPE.map(stage => stage.key);
+    return { ...s, status: order.indexOf(s.key) < order.indexOf(current) ? "done" : "waiting", statusText };
   });
 }
 
@@ -192,14 +242,16 @@ function MeterBar({ value, color = C.accent }) {
 function Donut({ pct, color, size = 120, stroke = 12, label, sub }) {
   const r = (size - stroke) / 2, circ = 2 * Math.PI * r, offset = circ * (1 - pct / 100);
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-      <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={C.border} strokeWidth={stroke} />
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round"
-          strokeDasharray={circ} strokeDashoffset={offset} style={{ "--arc-len": circ, "--arc-end": offset, animation: "drawArc 1.2s ease-out" }} />
-      </svg>
-      <div style={{ position: "relative", marginTop: -size / 2 - 14, textAlign: "center", height: size / 2 }}>
-        <div style={{ fontSize: 24, fontWeight: 800, color }}>{pct}%</div>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+      <div style={{ position: "relative", width: size, height: size, display: "grid", placeItems: "center" }}>
+        <svg width={size} height={size} style={{ transform: "rotate(-90deg)", position: "absolute", inset: 0 }}>
+          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={C.border} strokeWidth={stroke} />
+          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round"
+            strokeDasharray={circ} strokeDashoffset={offset} style={{ "--arc-len": circ, "--arc-end": offset, animation: "drawArc 1.2s ease-out" }} />
+        </svg>
+        <div style={{ textAlign: "center", lineHeight: 1 }}>
+          <div style={{ fontSize: Math.max(22, Math.round(size * 0.26)), fontWeight: 800, color }}>{pct}%</div>
+        </div>
       </div>
       {label && <div style={{ fontSize: 11, fontWeight: 600, color: C.text, marginTop: 4 }}>{label}</div>}
       {sub && <div style={{ fontSize: 10, color: C.muted }}>{sub}</div>}
@@ -421,9 +473,8 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [lastRef, setLastRef] = useState(null);
   const [syncRes, setSyncRes] = useState(null);
+  const [syncCooldownUntil, setSyncCooldownUntil] = useState(null);
   const [activeNav, setActiveNav] = useState("overview");
-  const [tokenUsage, setTokenUsage] = useState(null);
-  const [dailyTokens, setDailyTokens] = useState([]);
   const [topRoutes, setTopRoutes] = useState([]);
   const [topCallers, setTopCallers] = useState([]);
   const [teams, setTeams] = useState([]);
@@ -431,6 +482,7 @@ export default function App() {
   const [serviceHealth, setServiceHealth] = useState([]);
   const [errorRates, setErrorRates] = useState([]);
   const [latencyData, setLatencyData] = useState([]);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   /* Fetch changes + poll */
   useEffect(() => {
@@ -499,26 +551,44 @@ export default function App() {
     const ac = new AbortController();
     const f = u => fetch(`${API}${u}`, { signal: ac.signal, headers: HEADERS }).then(r => r.ok ? r.json() : null).catch(() => null);
     async function tick() {
-      const [tu, dt, tm, ct] = await Promise.allSettled([
-        f(`/analytics/token-usage?hours=${ANALYTICS_HOURS}`),
-        f(`/analytics/token-usage/daily?days=${ANALYTICS_DAYS}`),
+      const [tm, ct] = await Promise.allSettled([
         f("/teams"),
         f(`/analytics/cost-by-team?hours=${ANALYTICS_HOURS}`),
       ]);
-      if (tu.value) setTokenUsage(tu.value);
-      if (dt.value) setDailyTokens(dt.value);
       if (tm.value) setTeams(tm.value);
       if (ct.value) setCostByTeam(ct.value);
     }
     tick(); const id = setInterval(tick, 60_000); return () => { ac.abort(); clearInterval(id) };
   }, []);
 
+  useEffect(() => {
+    if (!syncCooldownUntil) return;
+    setNowMs(Date.now());
+    const id = setInterval(() => {
+      const now = Date.now();
+      setNowMs(now);
+      if (now >= syncCooldownUntil) setSyncCooldownUntil(null);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [syncCooldownUntil]);
+
   /* Sync handler */
   async function handleSync() {
+    if (syncCooldownUntil && syncCooldownUntil > Date.now()) return;
     setSyncing(true); setSyncRes(null);
     try {
       const sr = await fetch(`${API}/contracts/live-jobs/sync`, { method: "POST", headers: HEADERS });
-      if (sr.ok) setSyncRes(await sr.json()); else if (sr.status === 429) { const e = await sr.json().catch(() => ({})); setSyncRes({ error: e.detail || "Rate limited" }) }
+      if (sr.ok) {
+        setSyncCooldownUntil(null);
+        setSyncRes(await sr.json());
+      } else if (sr.status === 429) {
+        const cooldown = parseSyncResponse(await sr.json().catch(() => ({})));
+        if (cooldown.retryAfter) setSyncCooldownUntil(Date.now() + cooldown.retryAfter * 1000);
+        setSyncRes({ cooldown: true, message: cooldown.message, retryAfter: cooldown.retryAfter });
+      } else {
+        const err = parseSyncResponse(await sr.json().catch(() => ({})));
+        setSyncRes({ error: err.message });
+      }
       const cr = await fetch(`${API}/contracts/changes`, { headers: HEADERS }); if (cr.ok) { const d = await cr.json(); if (Array.isArray(d)) setChanges(d) }
       if (selId != null) { const dr = await fetch(`${API}/contracts/changes/${selId}`, { headers: HEADERS }); if (dr.ok) setDetail(await dr.json()) }
       setLastRef(new Date());
@@ -552,18 +622,11 @@ export default function App() {
   const serviceCount = useMemo(() => Object.keys(graph?.services || {}).length, [graph]);
   const totalApiCalls = useMemo(() => topRoutes.reduce((s, r) => s + (r.total_calls || 0), 0), [topRoutes]);
   const uniqueCallers = useMemo(() => new Set(topCallers.map(c => c.caller_service)).size, [topCallers]);
-  const dailyMax = useMemo(() => Math.max(1, ...dailyTokens.map(d => (d.input_tokens || 0) + (d.output_tokens || 0))), [dailyTokens]);
   const healthyCount = useMemo(() => serviceHealth.filter(s => s.server_error_rate_pct < 1).length, [serviceHealth]);
   const degradedCount = useMemo(() => serviceHealth.filter(s => s.server_error_rate_pct >= 1 && s.server_error_rate_pct < 10).length, [serviceHealth]);
   const criticalCount = useMemo(() => serviceHealth.filter(s => s.server_error_rate_pct >= 10).length, [serviceHealth]);
   const fleetErrorRate = useMemo(() => serviceHealth.length ? serviceHealth.reduce((s, h) => s + h.server_error_rate_pct, 0) / serviceHealth.length : 0, [serviceHealth]);
-  const totalTokens = useMemo(() => (tokenUsage?.total_input_tokens || 0) + (tokenUsage?.total_output_tokens || 0) + (tokenUsage?.total_cached_tokens || 0), [tokenUsage]);
-  const cacheRatio = useMemo(() => totalTokens ? ((tokenUsage?.total_cached_tokens || 0) / totalTokens) * 100 : 0, [tokenUsage, totalTokens]);
   const totalTeamSessions = useMemo(() => costByTeam.reduce((sum, row) => sum + (row.total_sessions || row.sessions || row.session_count || 0), 0), [costByTeam]);
-  const avgCostPerSession = useMemo(() => totalTeamSessions ? (tokenUsage?.total_cost || 0) / totalTeamSessions : 0, [tokenUsage, totalTeamSessions]);
-  const costPerThousandTokens = useMemo(() => totalTokens ? (tokenUsage?.total_cost || 0) / (totalTokens / 1000) : 0, [tokenUsage, totalTokens]);
-  const modelMix = useMemo(() => [...(tokenUsage?.breakdown_by_model || [])].sort((a, b) => (b.cost || 0) - (a.cost || 0)), [tokenUsage]);
-  const topModel = useMemo(() => modelMix[0] || null, [modelMix]);
   const teamSpendRows = useMemo(() => teams.map(team => {
     const spend = costByTeam.find(row => row.team_id === team.id) || {};
     const cost = spend.total_cost || team.total_cost || 0;
@@ -572,30 +635,36 @@ export default function App() {
     const utilization = budget > 0 ? Math.min(100, (cost / budget) * 100) : 0;
     return { ...team, cost, sessions, budget, utilization };
   }).sort((a, b) => b.cost - a.cost), [teams, costByTeam]);
+  const totalSpend = useMemo(() => teamSpendRows.reduce((sum, team) => sum + team.cost, 0), [teamSpendRows]);
+  const avgCostPerSession = useMemo(() => totalTeamSessions ? totalSpend / totalTeamSessions : 0, [totalSpend, totalTeamSessions]);
   const avgBudgetUse = useMemo(() => teamSpendRows.length ? teamSpendRows.reduce((sum, team) => sum + team.utilization, 0) / teamSpendRows.length : 0, [teamSpendRows]);
   const topTeam = useMemo(() => teamSpendRows[0] || null, [teamSpendRows]);
-  const peakUsageDay = useMemo(() => dailyTokens.reduce((best, day) => {
-    const total = (day.input_tokens || 0) + (day.output_tokens || 0);
-    return total > best.total ? { date: day.date, total } : best;
-  }, { date: null, total: 0 }), [dailyTokens]);
-  const dailyDelta = useMemo(() => {
-    if (dailyTokens.length < 2) return 0;
-    const prev = (dailyTokens[dailyTokens.length - 2].input_tokens || 0) + (dailyTokens[dailyTokens.length - 2].output_tokens || 0);
-    const latest = (dailyTokens[dailyTokens.length - 1].input_tokens || 0) + (dailyTokens[dailyTokens.length - 1].output_tokens || 0);
-    return prev ? ((latest - prev) / prev) * 100 : 0;
-  }, [dailyTokens]);
   const fleetP95 = useMemo(() => {
     const samples = latencyData.reduce((sum, row) => sum + (row.sample_count || 0), 0);
     if (!samples) return 0;
     return latencyData.reduce((sum, row) => sum + (row.p95_ms || 0) * (row.sample_count || 0), 0) / samples;
   }, [latencyData]);
+  const fleetUptime = useMemo(() => serviceHealth.length ? serviceHealth.reduce((sum, row) => sum + (row.uptime_pct || 0), 0) / serviceHealth.length : 0, [serviceHealth]);
   const topRoute = useMemo(() => topRoutes[0] || null, [topRoutes]);
+  const topCaller = useMemo(() => topCallers[0] || null, [topCallers]);
+  const teamsAtRisk = useMemo(() => teamSpendRows.filter(team => team.utilization >= 90).length, [teamSpendRows]);
+  const noisyRoutes = useMemo(() => errorRates.filter(route => (route.error_rate_pct || 0) > 0), [errorRates]);
+  const watchlistServices = useMemo(() => [...serviceHealth].sort((a, b) => {
+    const scoreA = (a.server_error_rate_pct || 0) * 1000 + (a.avg_latency_ms || 0);
+    const scoreB = (b.server_error_rate_pct || 0) * 1000 + (b.avg_latency_ms || 0);
+    return scoreB - scoreA;
+  }).slice(0, 4), [serviceHealth]);
   const recoveryTone = useMemo(() => {
     if (!selChange) return { label: "System Healthy", color: C.green, pulse: false };
     if (allJobsGreen) return { label: "Recovery Verified", color: C.green, pulse: false };
     if (jobs.length > 0 && prJobs.length === jobs.length) return { label: "Awaiting Merge", color: C.accent, pulse: false };
     return { label: "Recovery Active", color: C.yellow, pulse: true };
   }, [selChange, allJobsGreen, jobs, prJobs]);
+  const syncCooldownRemaining = useMemo(
+    () => syncCooldownUntil ? Math.max(0, Math.ceil((syncCooldownUntil - nowMs) / 1000)) : 0,
+    [syncCooldownUntil, nowMs],
+  );
+  const syncDisabled = syncing || syncCooldownRemaining > 0;
 
   /* ═══ LOADING ═══ */
   if (loading) return (
@@ -603,7 +672,7 @@ export default function App() {
       <style>{CSS}</style>
       <div style={{ textAlign: "center" }}>
         <div style={{ width: 40, height: 40, border: `3px solid ${C.border}`, borderTop: `3px solid ${C.accent}`, borderRadius: "50%", animation: "spin .8s linear infinite", margin: "0 auto 16px" }} />
-        <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Microservices Manager</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Platform Dashboard</div>
         <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Connecting...</div>
       </div>
     </div>
@@ -617,8 +686,8 @@ export default function App() {
       {/* ═══ SIDEBAR ═══ */}
       <nav style={{ width: SHELL.sidebarW, flexShrink: 0, background: C.card, borderRight: `1px solid ${C.border}`, position: "fixed", top: 0, left: 0, bottom: 0, overflowY: "auto", zIndex: 60, padding: "16px 0", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "0 16px 16px", borderBottom: `1px solid ${C.border}`, marginBottom: 10 }}>
-          <div style={{ fontSize: 14, fontWeight: 800, color: C.text, letterSpacing: "-.3px" }}>Microservices Manager</div>
-          <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>Platform Dashboard</div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: C.text, letterSpacing: "-.3px" }}>Platform Dashboard</div>
+          <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>Contract Recovery</div>
         </div>
         <div style={{ flex: 1 }}>
           {NAV.map(g => (
@@ -638,7 +707,7 @@ export default function App() {
         </div>
         {/* Sync + status at bottom of sidebar */}
         <div style={{ padding: "12px 16px", borderTop: `1px solid ${C.border}`, marginTop: "auto" }}>
-          <button onClick={handleSync} disabled={syncing} style={{ width: "100%", background: syncing ? C.border : C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: syncing ? "not-allowed" : "pointer", transition: "background .2s", marginBottom: 8 }}>{syncing ? "Syncing..." : "Sync Now"}</button>
+          <button onClick={handleSync} disabled={syncDisabled} style={{ width: "100%", background: syncDisabled ? C.border : C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: syncDisabled ? "not-allowed" : "pointer", transition: "background .2s", marginBottom: 8 }}>{syncing ? "Syncing..." : syncCooldownRemaining > 0 ? `Sync in ${syncCooldownRemaining}s` : "Sync Now"}</button>
           {lastRef && <div style={{ fontSize: 10, color: C.muted, textAlign: "center" }}>Updated {rel(lastRef.toISOString())}</div>}
         </div>
       </nav>
@@ -652,7 +721,7 @@ export default function App() {
           <div style={{ width: "100%", maxWidth: SHELL.contentMax, margin: "0 auto" }}>
             <div style={{ padding: `10px ${SHELL.headerPad}px`, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
               <div>
-                <h1 style={{ fontSize: 17, fontWeight: 800, color: C.text, margin: 0 }}>Microservices Manager</h1>
+                <h1 style={{ fontSize: 17, fontWeight: 800, color: C.text, margin: 0 }}>Platform Dashboard</h1>
                 <div style={{ fontSize: 10, color: C.muted, fontFamily: MONO }}>{API}</div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -667,32 +736,54 @@ export default function App() {
           {/* Pipeline — only shows when recovery is active */}
           {selChange && (
             <div style={{ width: "100%", maxWidth: SHELL.contentMax, margin: "0 auto", padding: `0 ${SHELL.headerPad}px 10px` }}>
-              <div style={{ display: "flex", alignItems: "stretch", gap: 2 }}>
+              <div style={{ display: "flex", alignItems: "stretch", width: "100%", minWidth: 0, paddingBottom: 2, gap: 0 }}>
                 {pipe.map((s, i) => {
                   const pc = s.status === "done" ? C.green : s.status === "active" ? C.yellow : C.muted;
                   const isCurrent = s.status === "active";
+                  const isDone = s.status === "done";
+                  const nextS = pipe[i + 1];
+                  const arrowLit = nextS && nextS.status !== "waiting";
+                  const arrowAnimated = arrowLit;
+                  const arrowColor = arrowLit ? (nextS.status === "done" ? C.green : C.yellow) : C.border;
                   return (
                     <React.Fragment key={s.key}>
+                      {/* Stage box */}
                       <div onClick={() => setActiveNav("blast")} style={{
-                        flex: 1, padding: isCurrent ? "6px 8px 8px" : "6px 8px", textAlign: "center", cursor: "pointer", transition: "all .3s",
-                        background: isCurrent ? `${pc}12` : "transparent",
-                        borderRadius: 6,
-                        border: isCurrent ? `1px solid ${pc}40` : "1px solid transparent",
-                        position: "relative",
+                        flex: "1 1 0", minWidth: 0, padding: "8px 8px 10px", textAlign: "center",
+                        cursor: "pointer", transition: "all .4s ease", position: "relative",
+                        background: isDone ? `${C.green}12` : isCurrent ? `${C.yellow}15` : C.card,
+                        borderRadius: 8,
+                        border: `1px solid ${isDone ? `${C.green}45` : isCurrent ? `${C.yellow}55` : C.border}`,
+                        boxShadow: isCurrent ? `0 0 0 2px ${C.yellow}25, 0 2px 8px ${C.yellow}15` : isDone ? `0 0 0 1px ${C.green}20` : "none",
                       }}>
-                        {isCurrent && <div style={{ fontSize: 7, color: pc, textTransform: "uppercase", letterSpacing: "1px", fontWeight: 800, marginBottom: 2, animation: "pulse 2s infinite" }}>CURRENT</div>}
-                        <div style={{ fontSize: 10, fontWeight: 700, color: pc }}>{s.label}</div>
-                        <div style={{ fontSize: 7, color: C.muted, marginTop: 1 }}>{s.desc}</div>
-                        <div style={{ marginTop: 3, display: "flex", justifyContent: "center" }}>
-                          {s.status === "done" && <span style={{ fontSize: 10, color: C.green }}>{"\u2713"}</span>}
-                          {s.status === "active" && <Dot color={pc} pulse />}
-                          {s.status === "waiting" && <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.border, display: "inline-block" }} />}
+                        {/* Top accent bar */}
+                        <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: pc, opacity: isDone ? 0.7 : isCurrent ? 1 : 0.15, transition: "all .4s", borderRadius: "8px 8px 0 0" }} />
+                        {isCurrent && <div style={{ fontSize: 6, color: pc, textTransform: "uppercase", letterSpacing: "1px", fontWeight: 800, marginBottom: 2, animation: "pulse 2s infinite" }}>LIVE</div>}
+                        <div style={{ fontSize: 10, fontWeight: 700, color: pc, transition: "color .3s" }}>{s.label}</div>
+                        <div style={{ fontSize: 7, color: C.muted, marginTop: 1, lineHeight: 1.3 }}>{s.desc}</div>
+                        {s.statusText && <div style={{ fontSize: 7, color: isDone ? C.green : isCurrent ? C.yellow : C.muted, marginTop: 2, fontWeight: 600, fontFamily: MONO, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.statusText}</div>}
+                        <div style={{ marginTop: 4, display: "flex", justifyContent: "center", alignItems: "center" }}>
+                          {isDone && <span style={{ fontSize: 11, color: C.green, fontWeight: 800, lineHeight: 1 }}>{"\u2713"}</span>}
+                          {isCurrent && <Dot color={pc} pulse />}
+                          {s.status === "waiting" && <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.border, display: "inline-block" }} />}
                         </div>
                       </div>
+                      {/* SVG arrow connector */}
                       {i < pipe.length - 1 && (
-                        <div style={{ display: "flex", alignItems: "center" }}>
-                          <div style={{ width: 12, height: 1, background: pipe[i + 1].status !== "waiting" ? C.green : C.border, transition: "background .3s" }} />
-                        </div>
+                        <svg width="100%" height="40" viewBox="0 0 100 40" preserveAspectRatio="none" fill="none" style={{ flex: "0 0 clamp(18px, 2vw, 34px)", minWidth: 18, display: "block" }}>
+                          <defs>
+                            <marker id={`arrowhead-${i}`} viewBox="0 0 8 6" refX="7" refY="3" markerWidth="5" markerHeight="4" orient="auto">
+                              <path d="M0,0 L8,3 L0,6 Z" fill={arrowColor} opacity={arrowLit ? 0.85 : 0.4} style={{ transition: "fill .4s, opacity .4s" }} />
+                            </marker>
+                          </defs>
+                          <path d="M6 20 H 86" fill="none" stroke={arrowColor} strokeWidth="1.5" strokeOpacity={arrowLit ? 0.35 : 0.2} style={{ transition: "stroke .4s, stroke-opacity .4s" }} />
+                          <path d="M6 20 H 86" fill="none" stroke={arrowColor} strokeWidth="2" strokeOpacity={arrowLit ? 0.9 : 0.35} strokeDasharray={arrowAnimated ? "7 5" : "0"} markerEnd={`url(#arrowhead-${i})`} style={{ transition: "stroke .4s, stroke-opacity .4s", animation: arrowAnimated ? "flowDash .9s linear infinite" : "none" }} />
+                          {arrowAnimated && (
+                            <circle r="2.5" fill={arrowColor} opacity="0.8">
+                              <animateMotion dur="1.2s" repeatCount="indefinite" path="M6 20 H 86" />
+                            </circle>
+                          )}
+                        </svg>
                       )}
                     </React.Fragment>
                   );
@@ -703,9 +794,9 @@ export default function App() {
         </header>
 
         {/* Sync banner */}
-        {syncRes && <div style={{ flexShrink: 0, background: syncRes.error ? `${C.red}0a` : `${C.green}0a`, borderBottom: `1px solid ${syncRes.error ? C.red : C.green}30`, color: syncRes.error ? C.red : C.green }}>
+        {syncRes && <div style={{ flexShrink: 0, background: syncRes.error ? `${C.red}0a` : syncRes.cooldown ? `${C.yellow}0a` : `${C.green}0a`, borderBottom: `1px solid ${syncRes.error ? C.red : syncRes.cooldown ? C.yellow : C.green}30`, color: syncRes.error ? C.red : syncRes.cooldown ? C.yellow : C.green }}>
           <div style={{ width: "100%", maxWidth: SHELL.contentMax, margin: "0 auto", padding: `8px ${SHELL.headerPad}px`, fontSize: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>{syncRes.error ? `Error: ${syncRes.error}` : `Synced ${syncRes.synced || 0} jobs (${syncRes.imported || 0} new, ${syncRes.updated || 0} updated)`}</span>
+            <span>{syncRes.error ? `Error: ${syncRes.error}` : syncRes.cooldown ? `${syncRes.message}${syncCooldownRemaining > 0 ? ` (${syncCooldownRemaining}s left)` : ""}` : `Synced ${syncRes.synced || 0} jobs (${syncRes.imported || 0} new, ${syncRes.updated || 0} updated)`}</span>
             <button onClick={() => setSyncRes(null)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 14 }}>{"\u2715"}</button>
           </div>
         </div>}
@@ -724,7 +815,7 @@ export default function App() {
                   <Met label="Health" value={serviceHealth.length ? `${healthyCount}/${serviceHealth.length}` : "..."} color={criticalCount > 0 ? C.red : degradedCount > 0 ? C.yellow : C.green} sub={criticalCount > 0 ? `${criticalCount} critical` : degradedCount > 0 ? `${degradedCount} degraded` : "all healthy"} />
                   <Met label="API Calls (7d)" value={totalApiCalls.toLocaleString()} color={C.green} sub={`${uniqueCallers} caller${uniqueCallers !== 1 ? "s" : ""}`} />
                   <Met label="Error Rate" value={`${fleetErrorRate.toFixed(1)}%`} color={fleetErrorRate >= 5 ? C.red : fleetErrorRate >= 1 ? C.yellow : C.green} sub="fleet avg (7d)" />
-                  <Met label="Platform Cost" value={`$${(tokenUsage?.total_cost || 0).toFixed(2)}`} color={C.yellow} sub={tokenUsage ? `${((tokenUsage.total_input_tokens || 0) + (tokenUsage.total_output_tokens || 0)).toLocaleString()} tokens` : ""} />
+                  <Met label="Platform Cost" value={`$${totalSpend.toFixed(2)}`} color={C.yellow} sub={`${totalTeamSessions.toLocaleString()} sessions`} />
                 </div>
 
                 {/* Recovery status — full width */}
@@ -756,7 +847,7 @@ export default function App() {
                         <p style={{ margin: 0, fontSize: 12, color: C.textSec, lineHeight: 1.5, marginBottom: 8 }}>{getSummary(detail || selChange)}</p>
                         {jobs.length > 0 && (
                           <div style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr", gap: 10, alignItems: "center" }}>
-                            <Donut pct={fixPct} color={allJobsGreen ? C.green : fixPct >= 70 ? C.accent : C.yellow} size={70} stroke={8} />
+                            <Donut pct={fixPct} color={allJobsGreen ? C.green : fixPct >= 70 ? C.accent : C.yellow} size={108} stroke={10} />
                             <Met label="MTTR" value={mttr || "n/a"} color={C.accent} />
                             <Met label="PRs" value={prJobs.length} color={C.accent} sub={allJobsGreen ? "all verified" : `${greenJobs.length} passed`} />
                           </div>
@@ -801,7 +892,7 @@ export default function App() {
           )}
 
           {/* ═══ SERVICE TOPOLOGY ═══ */}
-          {activeNav === "topology" && (
+          {(activeNav === "topology" || activeNav === "jobs") && (
             <Panel title="Service Dependency Graph" sub={graph?.waves ? `${graph.waves.length} waves \u00B7 ${serviceCount} services \u00B7 ${(graph.edges || []).length} edges` : "Loading service graph..."}>
               <WaveGraph graph={graph} jobs={jobs} serviceHealth={serviceHealth} />
               {graph?.waves?.length > 0 && (
@@ -821,6 +912,71 @@ export default function App() {
                   ))}
                 </div>
               )}
+              <div style={{ marginTop: 18, paddingTop: 18, borderTop: `1px solid ${C.border}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 700 }}>Remediation Flow</div>
+                    <div style={{ fontSize: 12, color: C.textSec, marginTop: 4 }}>
+                      {jobs.length ? `${activeJobs.length} active, ${prJobs.length} PRs, ${greenJobs.length} passed` : "No remediation jobs dispatched"}
+                    </div>
+                  </div>
+                  {jobs.length > 0 && (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <Badge color={C.accent}>{prJobs.length} PRs</Badge>
+                      <Badge color={C.green}>{greenJobs.length} green</Badge>
+                    </div>
+                  )}
+                </div>
+                {jobs.length === 0 ? (
+                  selChange
+                    ? <NoData msg="No remediation jobs dispatched yet for this change." />
+                    : <div style={{ padding: "20px 0", textAlign: "center" }}><Dot color={C.green} /><span style={{ fontSize: 13, color: C.green, marginLeft: 8 }}>No active remediation — platform healthy</span></div>
+                ) : (
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {jobs.map(j => {
+                      const sc = STATUS[j.status] || STATUS.queued;
+                      const stages = [
+                        { label: "Queued", done: true, color: C.muted },
+                        { label: "Running", done: ["running", "pr_opened", "ci_failed", "needs_human", "green"].includes(j.status), color: C.yellow },
+                        { label: "PR Open", done: !!j.pr_url, color: C.accent },
+                        { label: j.status === "ci_failed" ? "CI Failed" : "CI Passed", done: j.status === "green" || j.status === "ci_failed", color: j.status === "ci_failed" ? C.red : C.green, failed: j.status === "ci_failed" },
+                        { label: "Verified", done: j.status === "green", color: C.green },
+                      ];
+                      return (
+                        <div key={j.job_id} style={{ padding: "16px 18px", background: C.surface, borderRadius: 12, border: `1px solid ${C.border}`, borderLeft: `3px solid ${sc.color}` }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              <Dot color={sc.color} pulse={j.status === "running"} />
+                              <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{rn(j.target_repo)}</span>
+                            </div>
+                            <span style={{ fontSize: 10, color: C.muted }}>{rel(j.updated_at || j.created_at)}</span>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 10, flexWrap: "wrap" }}>
+                            {stages.map((s, i) => (
+                              <React.Fragment key={s.label}>
+                                <div style={{
+                                  padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 600,
+                                  background: s.failed ? `${C.red}15` : s.done ? `${s.color}15` : `${C.muted}08`,
+                                  color: s.failed ? C.red : s.done ? s.color : C.muted,
+                                  border: `1px solid ${s.failed ? `${C.red}40` : s.done ? `${s.color}30` : C.border}`,
+                                }}>{s.label}</div>
+                                {i < stages.length - 1 && <div style={{ width: 10, height: 1, background: stages[i + 1].done ? stages[i + 1].color : C.border, opacity: 0.5 }} />}
+                              </React.Fragment>
+                            ))}
+                          </div>
+                          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12, alignItems: "center" }}>
+                            {j.devin_session_url && <ExtL href={j.devin_session_url}>Devin Session</ExtL>}
+                            {j.pr_url && <ExtL href={j.pr_url}>Pull Request</ExtL>}
+                            {j.is_dry_run && <Badge color={C.yellow} style={{ fontSize: 10 }}>DRY RUN</Badge>}
+                            {j.status === "needs_human" && <Badge color={C.yellow}>Needs Review</Badge>}
+                          </div>
+                          {j.error_summary && <div style={{ marginTop: 8, padding: "8px 10px", background: `${C.red}08`, borderRadius: 6, fontSize: 11, color: C.red, fontFamily: MONO }}>{j.error_summary}</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </Panel>
           )}
 
@@ -955,49 +1111,58 @@ export default function App() {
 
           {/* ═══ ANALYTICS ═══ */}
           {activeNav === "analytics" && (
-            <Panel title="Analytics" sub={tokenUsage ? `${ANALYTICS_DAYS}d spend $${(tokenUsage.total_cost || 0).toFixed(2)} \u00B7 ${totalTeamSessions.toLocaleString()} sessions \u00B7 ${teams.length} teams` : "Loading..."}>
+            <Panel title="Analytics" sub={teamSpendRows.length || topRoutes.length || serviceHealth.length ? `${ANALYTICS_DAYS}d spend $${totalSpend.toFixed(2)} \u00B7 ${totalTeamSessions.toLocaleString()} sessions \u00B7 ${teams.length} teams` : "Loading..."}>
               <div style={{ display: "grid", gap: 14 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(155px, 1fr))", gap: 10 }}>
-                  <Met label={`${ANALYTICS_DAYS}d Tokens`} value={totalTokens.toLocaleString()} color={C.accent} sub={`${(tokenUsage?.total_cached_tokens || 0).toLocaleString()} cached`} />
-                  <Met label={`${ANALYTICS_DAYS}d Spend`} value={`$${(tokenUsage?.total_cost || 0).toFixed(2)}`} color={C.yellow} sub={`${Math.max(totalTeamSessions, 0).toLocaleString()} sessions`} />
-                  <Met label="Cache Ratio" value={`${cacheRatio.toFixed(1)}%`} color={cacheRatio >= 18 ? C.green : cacheRatio >= 10 ? C.yellow : C.red} sub="reused context" />
+                  <Met label={`${ANALYTICS_DAYS}d Spend`} value={`$${totalSpend.toFixed(2)}`} color={C.yellow} sub={topTeam ? `${topTeam.name} highest` : `${teams.length} teams tracked`} />
+                  <Met label={`${ANALYTICS_DAYS}d Sessions`} value={Math.max(totalTeamSessions, 0).toLocaleString()} color={C.accent} sub={`${teams.length} teams active`} />
                   <Met label="Cost / Session" value={`$${avgCostPerSession.toFixed(2)}`} color={avgCostPerSession <= 2 ? C.green : avgCostPerSession <= 4 ? C.yellow : C.red} sub="blended average" />
-                  <Met label="Cost / 1k Tokens" value={`$${costPerThousandTokens.toFixed(3)}`} color={C.accent} sub="effective rate" />
+                  <Met label="Budget Pressure" value={`${avgBudgetUse.toFixed(1)}%`} color={avgBudgetUse < 70 ? C.green : avgBudgetUse < 90 ? C.yellow : C.red} sub={teamsAtRisk ? `${teamsAtRisk} teams > 90%` : "budget healthy"} />
                   <Met label="Fleet P95" value={fleetP95 ? `${fleetP95.toFixed(0)}ms` : "n/a"} color={fleetP95 < 300 ? C.green : fleetP95 < 900 ? C.yellow : C.red} sub="API latency" />
+                  <Met label="API Calls (7d)" value={totalApiCalls.toLocaleString()} color={C.green} sub={`${uniqueCallers} active callers`} />
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.9fr) minmax(320px, 1fr)", gap: 14 }}>
                   <SectionCard
-                    title={`${ANALYTICS_DAYS}-Day Token Flow`}
-                    sub={peakUsageDay.date ? `Peak load ${new Date(peakUsageDay.date).toLocaleDateString(undefined, { month: "short", day: "numeric" })} \u00B7 ${peakUsageDay.total.toLocaleString()} tokens` : "Awaiting usage trend"}
-                    right={<Badge color={dailyDelta >= 0 ? C.green : C.red}>{dailyDelta >= 0 ? "+" : ""}{dailyDelta.toFixed(1)}% day/day</Badge>}
+                    title="Team Spend Distribution"
+                    sub={topTeam ? `${topTeam.name} leads spend at $${topTeam.cost.toFixed(2)}` : "Awaiting cost data"}
+                    right={<Badge color={avgBudgetUse < 70 ? C.green : avgBudgetUse < 90 ? C.yellow : C.red}>{avgBudgetUse.toFixed(1)}% avg budget use</Badge>}
                   >
-                    {dailyTokens.length > 0 ? (
+                    {teamSpendRows.length > 0 ? (
                       <div>
-                        <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 156 }}>
-                          {dailyTokens.map((day, i) => {
-                            const total = (day.input_tokens || 0) + (day.output_tokens || 0);
-                            const barHeight = Math.max(10, Math.round((total / dailyMax) * 128));
-                            const label = day.date ? new Date(day.date).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : `D${i + 1}`;
+                        <div style={{ display: "grid", gap: 10 }}>
+                          {teamSpendRows.slice(0, 5).map(team => {
+                            const maxSpend = Math.max(1, ...teamSpendRows.map(row => row.cost || 0));
+                            const barWidth = Math.max(8, Math.round(((team.cost || 0) / maxSpend) * 100));
                             return (
-                              <div key={i} style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", alignItems: "center", gap: 6 }}>
-                                <div style={{ fontSize: 9, color: C.textSec }}>{total.toLocaleString()}</div>
-                                <div style={{ width: "100%", maxWidth: 46, height: barHeight, borderRadius: "10px 10px 4px 4px", background: `linear-gradient(180deg, ${C.accentLt}, ${C.accent})`, boxShadow: `0 10px 24px ${C.accent}25` }} />
-                                <div style={{ fontSize: 8, color: C.muted, whiteSpace: "nowrap" }}>{label}</div>
+                              <div key={team.id}>
+                                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+                                  <div>
+                                    <div style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{team.name}</div>
+                                    <div style={{ fontSize: 10, color: C.muted }}>{team.sessions.toLocaleString()} sessions \u00B7 {team.plan}</div>
+                                  </div>
+                                  <div style={{ textAlign: "right" }}>
+                                    <div style={{ fontSize: 12, fontWeight: 700, color: C.yellow }}>${team.cost.toFixed(2)}</div>
+                                    <div style={{ fontSize: 10, color: team.utilization < 70 ? C.green : team.utilization < 90 ? C.yellow : C.red }}>{team.utilization.toFixed(0)}% budget</div>
+                                  </div>
+                                </div>
+                                <div style={{ height: 8, background: C.border, borderRadius: 999, overflow: "hidden" }}>
+                                  <div style={{ height: "100%", width: `${barWidth}%`, background: `linear-gradient(90deg, ${C.accentLt}, ${C.accent})`, borderRadius: 999, transition: "width .6s ease-out" }} />
+                                </div>
                               </div>
                             );
                           })}
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginTop: 14 }}>
-                          <Met label="Peak Day" value={peakUsageDay.total.toLocaleString()} color={C.accent} sub={peakUsageDay.date ? new Date(peakUsageDay.date).toLocaleDateString(undefined, { weekday: "short" }) : "n/a"} />
-                          <Met label="Top Model" value={topModel?.model || "n/a"} color={C.green} sub={topModel ? `$${(topModel.cost || 0).toFixed(2)} spend` : "Awaiting model data"} />
                           <Met label="Top Team" value={topTeam?.name || "n/a"} color={C.yellow} sub={topTeam ? `$${topTeam.cost.toFixed(2)} spend` : "Awaiting team data"} />
+                          <Met label="Budget Alerts" value={teamsAtRisk} color={teamsAtRisk ? C.red : C.green} sub={teamsAtRisk ? "teams above 90%" : "none"} />
+                          <Met label="Top Caller" value={topCaller?.caller_service || "n/a"} color={C.green} sub={topCaller ? `${(topCaller.call_count || 0).toLocaleString()} calls` : "Awaiting caller data"} />
                         </div>
                       </div>
-                    ) : <NoData msg="Token usage trend will appear as the platform processes sessions." />}
+                    ) : <NoData msg="Team spend appears once sessions and billing data are recorded." />}
                   </SectionCard>
 
-                  <SectionCard title="Efficiency + Guardrails" sub="Operational health of spend, caching, and incident exposure">
+                  <SectionCard title="Operational Pressure" sub="Budget, latency, uptime, and incident exposure">
                     <div style={{ display: "grid", gap: 12 }}>
                       <div>
                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textSec, marginBottom: 5 }}>
@@ -1008,10 +1173,10 @@ export default function App() {
                       </div>
                       <div>
                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textSec, marginBottom: 5 }}>
-                          <span>Cache effectiveness</span>
-                          <span>{cacheRatio.toFixed(1)}%</span>
+                          <span>Fleet uptime</span>
+                          <span>{fleetUptime.toFixed(1)}%</span>
                         </div>
-                        <MeterBar value={cacheRatio} color={cacheRatio >= 18 ? C.green : C.yellow} />
+                        <MeterBar value={fleetUptime} color={fleetUptime >= 99 ? C.green : fleetUptime >= 97 ? C.yellow : C.red} />
                       </div>
                       <div>
                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textSec, marginBottom: 5 }}>
@@ -1023,36 +1188,38 @@ export default function App() {
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
                         <Met label="Healthy Services" value={healthyCount} color={C.green} sub={`${serviceHealth.length} tracked`} />
                         <Met label="Hot Route" value={topRoute?.method || "n/a"} color={C.accent} sub={topRoute?.route_template || "Awaiting route data"} />
+                        <Met label="Critical Services" value={criticalCount} color={criticalCount ? C.red : C.green} sub={criticalCount ? "needs attention" : "none"} />
+                        <Met label="Erroring Routes" value={noisyRoutes.length} color={noisyRoutes.length ? C.yellow : C.green} sub="non-zero error rate" />
                       </div>
                     </div>
                   </SectionCard>
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
-                  <SectionCard title="Model Mix" sub="Spend and throughput by model">
-                    {modelMix.length > 0 ? (
+                  <SectionCard title="Caller Concentration" sub="Which services are driving the most demand">
+                    {topCallers.length > 0 ? (
                       <div style={{ display: "grid", gap: 10 }}>
-                        {modelMix.map(model => {
-                          const modelTokens = (model.input_tokens || 0) + (model.output_tokens || 0);
-                          const share = totalTokens ? (modelTokens / totalTokens) * 100 : 0;
+                        {topCallers.slice(0, 5).map(caller => {
+                          const maxCalls = Math.max(1, ...topCallers.map(row => row.call_count || 0));
+                          const share = ((caller.call_count || 0) / maxCalls) * 100;
                           return (
-                            <div key={model.model}>
+                            <div key={caller.caller_service}>
                               <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
                                 <div>
-                                  <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: MONO }}>{model.model}</div>
-                                  <div style={{ fontSize: 10, color: C.muted }}>{modelTokens.toLocaleString()} tokens</div>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{caller.caller_service}</div>
+                                  <div style={{ fontSize: 10, color: C.muted }}>{caller.routes_called || 0} routes touched</div>
                                 </div>
                                 <div style={{ textAlign: "right" }}>
-                                  <div style={{ fontSize: 12, fontWeight: 700, color: C.yellow }}>${(model.cost || 0).toFixed(2)}</div>
-                                  <div style={{ fontSize: 10, color: C.textSec }}>{share.toFixed(1)}% share</div>
+                                  <div style={{ fontSize: 12, fontWeight: 700, color: C.accent }}>{(caller.call_count || 0).toLocaleString()}</div>
+                                  <div style={{ fontSize: 10, color: C.textSec }}>{share.toFixed(1)}% of leader</div>
                                 </div>
                               </div>
-                              <MeterBar value={share} color={share > 35 ? C.accent : C.green} />
+                              <MeterBar value={share} color={share > 75 ? C.accent : C.green} />
                             </div>
                           );
                         })}
                       </div>
-                    ) : <NoData msg="Model mix will appear once token usage is recorded." />}
+                    ) : <NoData msg="Caller concentration appears after service-to-service traffic is recorded." />}
                   </SectionCard>
 
                   <SectionCard title="Team Spend Leaderboard" sub="Budget pressure and session concentration">
@@ -1080,27 +1247,54 @@ export default function App() {
                     ) : <NoData msg="Team spend will populate as the platform records cost." />}
                   </SectionCard>
 
-                  <SectionCard title="Platform Ops Snapshot" sub="Cross-cutting demand, traffic, and caller concentration">
+                  <SectionCard title="Service Watchlist" sub="Services with the most combined error and latency pressure">
                     <div style={{ display: "grid", gap: 10 }}>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-                        <Met label="API Calls" value={totalApiCalls.toLocaleString()} color={C.accent} sub="7d observability" />
-                        <Met label="Unique Callers" value={uniqueCallers} color={C.green} sub="service telemetry" />
-                      </div>
-                      <div style={{ display: "grid", gap: 8 }}>
-                        {topRoutes.slice(0, 3).map(route => (
-                          <div key={`${route.method}-${route.route_template}`} style={{ padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, background: `${C.card}80` }}>
+                      {watchlistServices.length > 0 ? watchlistServices.map(service => {
+                        const tone = service.server_error_rate_pct < 1 ? C.green : service.server_error_rate_pct < 10 ? C.yellow : C.red;
+                        return (
+                          <div key={service.caller_service} style={{ padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, background: `${C.card}80` }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                              <div>
+                                <div style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{service.caller_service}</div>
+                                <div style={{ fontSize: 10, color: C.muted }}>{(service.total_requests || 0).toLocaleString()} requests in 7d</div>
+                              </div>
+                              <Badge color={tone}>{service.server_error_rate_pct.toFixed(1)}%</Badge>
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 8 }}>
+                              <Met label="Latency" value={`${(service.avg_latency_ms || 0).toFixed(0)}ms`} color={(service.avg_latency_ms || 0) < 100 ? C.green : (service.avg_latency_ms || 0) < 500 ? C.yellow : C.red} sub="avg" />
+                              <Met label="Uptime" value={`${(service.uptime_pct || 0).toFixed(1)}%`} color={(service.uptime_pct || 0) >= 99 ? C.green : (service.uptime_pct || 0) >= 97 ? C.yellow : C.red} sub={rel(service.last_seen)} />
+                            </div>
+                          </div>
+                        );
+                      }) : <NoData msg="Service watchlist appears after telemetry is recorded." />}
+                    </div>
+                  </SectionCard>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+                  <SectionCard title="Route Pressure" sub="High-volume and high-friction routes across the platform">
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {(errorRates.length > 0 ? errorRates : topRoutes).slice(0, 5).map(route => {
+                        const method = route.method || "GET";
+                        const errorPct = route.error_rate_pct ?? route.server_error_rate_pct ?? 0;
+                        const latency = route.avg_latency_ms ?? route.avg_duration_ms ?? 0;
+                        return (
+                          <div key={`${method}-${route.route_template}`} style={{ padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, background: `${C.card}80` }}>
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                               <div style={{ minWidth: 0 }}>
-                                <div style={{ fontSize: 10, color: C.muted }}>{route.method}</div>
+                                <div style={{ fontSize: 10, color: C.muted }}>{method}</div>
                                 <div style={{ fontSize: 11, color: C.textSec, fontFamily: MONO, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{route.route_template}</div>
                               </div>
-                              <Badge color={route.avg_duration_ms < 100 ? C.green : route.avg_duration_ms < 300 ? C.yellow : C.red}>{route.avg_duration_ms.toFixed(0)}ms</Badge>
+                              <Badge color={errorPct === 0 ? C.green : errorPct < 5 ? C.yellow : C.red}>{errorPct.toFixed(1)}%</Badge>
                             </div>
-                            <div style={{ marginTop: 6, fontSize: 10, color: C.textSec }}>{(route.total_calls || 0).toLocaleString()} calls \u00B7 {route.unique_callers || 0} callers</div>
+                            <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", gap: 8, fontSize: 10, color: C.textSec }}>
+                              <span>{(route.total_calls || 0).toLocaleString()} calls</span>
+                              <span>{latency.toFixed(0)}ms avg latency</span>
+                            </div>
                           </div>
-                        ))}
-                        {topRoutes.length === 0 && <NoData msg="Route pressure appears after traffic syncs in." />}
-                      </div>
+                        );
+                      })}
+                      {errorRates.length === 0 && topRoutes.length === 0 && <NoData msg="Route pressure appears after traffic syncs in." />}
                     </div>
                   </SectionCard>
                 </div>
@@ -1128,7 +1322,7 @@ export default function App() {
                   </SectionCard>
                 )}
 
-                {!tokenUsage && dailyTokens.length === 0 && teams.length === 0 && (
+                {teamSpendRows.length === 0 && topRoutes.length === 0 && serviceHealth.length === 0 && (
                   <NoData msg="Analytics data will populate as the platform processes requests." />
                 )}
               </div>
@@ -1136,27 +1330,59 @@ export default function App() {
           )}
 
           {/* ═══ BLAST RADIUS ═══ */}
-          {activeNav === "blast" && (
-            <Panel title="Blast Radius" sub={blast.sc > 0 ? `${blast.sc} services, ${blast.svcs.join(", ")}` : "System healthy"}>
+          {activeNav === "blast" && (() => {
+            const blastSeverity = blast.sc >= 5 ? "critical" : blast.sc >= 3 ? "high" : blast.sc >= 1 ? "moderate" : "none";
+            const blastColor = blastSeverity === "critical" ? C.red : blastSeverity === "high" ? C.yellow : blastSeverity === "moderate" ? C.accent : C.green;
+            const affectedRoutes = blast.rc || impactRows.length;
+            const totalTrafficAtRisk = blast.calls;
+            const remediatedCount = greenJobs.length;
+            const unresolvedCount = blast.sc - remediatedCount;
+            return (
+            <Panel title="Blast Radius" sub={blast.sc > 0 ? `${blastSeverity.toUpperCase()} — ${blast.sc} service${blast.sc !== 1 ? "s" : ""} in failure zone` : "All systems nominal"}>
               {!selChange ? (
-                <div style={{ padding: "20px 0", textAlign: "center" }}>
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                    <Dot color={C.green} />
-                    <span style={{ fontSize: 14, fontWeight: 700, color: C.green }}>No Active Blast Radius</span>
+                <div style={{ padding: "30px 0", textAlign: "center" }}>
+                  <div style={{ width: 48, height: 48, borderRadius: "50%", background: `${C.green}15`, border: `2px solid ${C.green}40`, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+                    <span style={{ fontSize: 22, color: C.green }}>{"\u2713"}</span>
                   </div>
-                  <p style={{ fontSize: 12, color: C.muted, margin: 0 }}>All {serviceCount} services operating normally.</p>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: C.green, marginBottom: 4 }}>Blast Radius: Contained</div>
+                  <p style={{ fontSize: 12, color: C.muted, margin: 0, maxWidth: 400, marginLeft: "auto", marginRight: "auto", lineHeight: 1.5 }}>
+                    No breach or failure propagation detected. All {serviceCount} services are isolated and operating within normal parameters.
+                  </p>
                 </div>
               ) : blast.sc === 0 ? <NoData msg="No impacted services detected" /> : (
                 <div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 16 }}>
-                    <Met label="Services at Risk" value={blast.sc} color={C.red} />
-                    <Met label="Jobs Dispatched" value={jobs.length} color={C.yellow} />
-                    <Met label="PRs Opened" value={prJobs.length} color={C.accent} />
-                    <Met label="Risk Score" value={((selChange.incident_risk_score || selChange.severity) || "low").toUpperCase()} color={sev.color} />
+                  {/* Blast severity banner */}
+                  <div style={{ padding: "12px 16px", background: `${blastColor}0a`, border: `1px solid ${blastColor}30`, borderRadius: 10, marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ width: 36, height: 36, borderRadius: "50%", background: `${blastColor}18`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Dot color={blastColor} pulse={unresolvedCount > 0} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: blastColor }}>{blastSeverity === "critical" ? "Large Blast Radius" : blastSeverity === "high" ? "Significant Blast Radius" : "Limited Blast Radius"}</div>
+                      <div style={{ fontSize: 11, color: C.textSec, marginTop: 2, lineHeight: 1.4 }}>
+                        {unresolvedCount > 0
+                          ? `A single point of failure can propagate across ${blast.sc} service${blast.sc !== 1 ? "s" : ""}, affecting ${affectedRoutes} route${affectedRoutes !== 1 ? "s" : ""} and ${totalTrafficAtRisk.toLocaleString()} API calls (7d). ${unresolvedCount} service${unresolvedCount !== 1 ? "s remain" : " remains"} unresolved.`
+                          : `Blast radius contained. All ${blast.sc} impacted service${blast.sc !== 1 ? "s have" : " has"} been remediated.`}
+                      </div>
+                    </div>
+                    <Badge color={blastColor} style={{ fontSize: 11 }}>{blastSeverity.toUpperCase()}</Badge>
                   </div>
+
+                  {/* Impact KPIs */}
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, marginBottom: 16 }}>
+                    <Met label="Services Affected" value={blast.sc} color={C.red} sub={`of ${serviceCount} total`} />
+                    <Met label="Routes Exposed" value={affectedRoutes} color={C.yellow} sub="dependency paths" />
+                    <Met label="Traffic at Risk" value={totalTrafficAtRisk.toLocaleString()} color={C.accent} sub="calls in 7d window" />
+                    <Met label="Remediated" value={`${remediatedCount}/${blast.sc}`} color={remediatedCount === blast.sc ? C.green : C.yellow} sub={remediatedCount === blast.sc ? "fully contained" : `${unresolvedCount} unresolved`} />
+                    <Met label="Risk Score" value={((selChange.incident_risk_score || selChange.severity) || "low").toUpperCase()} color={sev.color} sub="incident severity" />
+                  </div>
+
+                  {/* Affected services */}
                   {blast.svcs.length > 0 && (
                     <div style={{ marginBottom: 14 }}>
-                      <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 600, marginBottom: 8 }}>Impacted Services</div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                        <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 600 }}>Failure Propagation — Affected Services</div>
+                        <Badge color={blastColor}>{unresolvedCount > 0 ? `${unresolvedCount} exposed` : "all contained"}</Badge>
+                      </div>
                       <div style={{ display: "grid", gap: 6 }}>
                         {blast.svcs.map(s => {
                           const info = graph?.services?.[s];
@@ -1165,8 +1391,9 @@ export default function App() {
                           const health = serviceHealth.find(h => h.caller_service === s);
                           const errPct = health?.server_error_rate_pct ?? null;
                           const errColor = errPct === null ? C.muted : errPct >= 10 ? C.red : errPct >= 1 ? C.yellow : C.green;
+                          const isResolved = job?.status === "green";
                           return (
-                            <div key={s} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: C.surface, borderRadius: 8, border: `1px solid ${C.border}`, borderLeft: `3px solid ${sc?.color || C.muted}` }}>
+                            <div key={s} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: isResolved ? `${C.green}06` : C.surface, borderRadius: 8, border: `1px solid ${isResolved ? `${C.green}25` : C.border}`, borderLeft: `3px solid ${sc?.color || C.muted}`, transition: "all .3s" }}>
                               <Dot color={sc?.color || C.muted} pulse={job?.status === "running"} />
                               <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{s}</span>
                               {info?.language && <Badge color={C.muted} style={{ fontSize: 9 }}>{info.language}</Badge>}
@@ -1189,6 +1416,7 @@ export default function App() {
                   )}
                   {impactRows.length > 0 && (
                     <div style={{ overflowX: "auto", marginTop: 12 }}>
+                      <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 600, marginBottom: 8 }}>Dependency Impact Map</div>
                       <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: "0 3px", fontSize: 12 }}>
                         <thead><tr>{["Service", "Route", "Method", "7d Calls", "Confidence"].map(h => <th key={h} style={{ textAlign: "left", padding: "5px 10px", color: C.muted, fontSize: 9, textTransform: "uppercase", letterSpacing: "1px", fontWeight: 700 }}>{h}</th>)}</tr></thead>
                         <tbody>{impactRows.map((r, i) => (
@@ -1206,62 +1434,8 @@ export default function App() {
                 </div>
               )}
             </Panel>
-          )}
-
-          {/* ═══ REMEDIATION JOBS ═══ */}
-          {activeNav === "jobs" && (
-            <Panel title="Remediation Jobs" sub={jobs.length ? `${activeJobs.length} active, ${prJobs.length} PRs, ${greenJobs.length} passed` : "No jobs dispatched"}>
-              {jobs.length === 0 ? (
-                selChange
-                  ? <NoData msg="No remediation jobs dispatched yet for this change." />
-                  : <div style={{ padding: "20px 0", textAlign: "center" }}><Dot color={C.green} /><span style={{ fontSize: 13, color: C.green, marginLeft: 8 }}>No active remediation — platform healthy</span></div>
-              ) : (
-                <div style={{ display: "grid", gap: 10 }}>
-                  {jobs.map(j => {
-                    const sc = STATUS[j.status] || STATUS.queued;
-                    const stages = [
-                      { label: "Queued", done: true, color: C.muted },
-                      { label: "Running", done: ["running", "pr_opened", "ci_failed", "needs_human", "green"].includes(j.status), color: C.yellow },
-                      { label: "PR Open", done: !!j.pr_url, color: C.accent },
-                      { label: j.status === "ci_failed" ? "CI Failed" : "CI Passed", done: j.status === "green" || j.status === "ci_failed", color: j.status === "ci_failed" ? C.red : C.green, failed: j.status === "ci_failed" },
-                      { label: "Verified", done: j.status === "green", color: C.green },
-                    ];
-                    return (
-                      <div key={j.job_id} style={{ padding: "16px 18px", background: C.surface, borderRadius: 12, border: `1px solid ${C.border}`, borderLeft: `3px solid ${sc.color}` }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <Dot color={sc.color} pulse={j.status === "running"} />
-                            <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{rn(j.target_repo)}</span>
-                          </div>
-                          <span style={{ fontSize: 10, color: C.muted }}>{rel(j.updated_at || j.created_at)}</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 10 }}>
-                          {stages.map((s, i) => (
-                            <React.Fragment key={s.label}>
-                              <div style={{
-                                padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 600,
-                                background: s.failed ? `${C.red}15` : s.done ? `${s.color}15` : `${C.muted}08`,
-                                color: s.failed ? C.red : s.done ? s.color : C.muted,
-                                border: `1px solid ${s.failed ? `${C.red}40` : s.done ? `${s.color}30` : C.border}`,
-                              }}>{s.label}</div>
-                              {i < stages.length - 1 && <div style={{ width: 10, height: 1, background: stages[i + 1].done ? stages[i + 1].color : C.border, opacity: 0.5 }} />}
-                            </React.Fragment>
-                          ))}
-                        </div>
-                        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12, alignItems: "center" }}>
-                          {j.devin_session_url && <ExtL href={j.devin_session_url}>Devin Session</ExtL>}
-                          {j.pr_url && <ExtL href={j.pr_url}>Pull Request</ExtL>}
-                          {j.is_dry_run && <Badge color={C.yellow} style={{ fontSize: 10 }}>DRY RUN</Badge>}
-                          {j.status === "needs_human" && <Badge color={C.yellow}>Needs Review</Badge>}
-                        </div>
-                        {j.error_summary && <div style={{ marginTop: 8, padding: "8px 10px", background: `${C.red}08`, borderRadius: 6, fontSize: 11, color: C.red, fontFamily: MONO }}>{j.error_summary}</div>}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </Panel>
-          )}
+            );
+          })()}
 
           {/* ═══ AUDIT TRAIL ═══ */}
           {activeNav === "audit" && (
