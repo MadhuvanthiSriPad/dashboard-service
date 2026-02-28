@@ -7,6 +7,7 @@ the React frontend static build in production.
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -222,18 +223,30 @@ async def list_teams(request: Request):
 
 
 @app.get("/api/analytics/token-usage")
-async def token_usage(request: Request):
-    daily = await _proxy(
-        _client(request), f"{GATEWAY}/api/v1/analytics/token-usage/daily"
+async def token_usage(request: Request, hours: int = 24):
+    days = max(1, min(30, (hours + 23) // 24))
+    summary = await _proxy(
+        _client(request), f"{GATEWAY}/api/v1/analytics/token-usage?hours={hours}"
     )
-    usage = daily if isinstance(daily, list) else []
-    return {"usage": usage}
+    daily = await _proxy(
+        _client(request), f"{GATEWAY}/api/v1/analytics/token-usage/daily?days={days}"
+    )
+    payload = summary if isinstance(summary, dict) else {}
+    payload["usage"] = daily if isinstance(daily, list) else []
+    return payload
+
+
+@app.get("/api/analytics/token-usage/daily")
+async def token_usage_daily(request: Request, days: int = 7):
+    return await _proxy(
+        _client(request), f"{GATEWAY}/api/v1/analytics/token-usage/daily?days={days}"
+    )
 
 
 @app.get("/api/analytics/cost-by-team")
-async def cost_by_team(request: Request):
+async def cost_by_team(request: Request, hours: int = 24):
     return await _proxy(
-        _client(request), f"{GATEWAY}/api/v1/analytics/cost-by-team"
+        _client(request), f"{GATEWAY}/api/v1/analytics/cost-by-team?hours={hours}"
     )
 
 
@@ -258,24 +271,73 @@ async def billing_summary(request: Request):
 
 
 @app.get("/api/usage/top-routes")
-async def usage_top_routes(request: Request, since_days: int = 7):
+async def usage_top_routes(request: Request, since_days: int = 7, limit: int = 20):
     return await _proxy(
         _client(request),
-        f"{GATEWAY}/api/v1/usage/top-routes?since_days={since_days}",
+        f"{GATEWAY}/api/v1/usage/top-routes?since_days={since_days}&limit={limit}",
     )
 
 
 @app.get("/api/usage/top-callers")
-async def usage_top_callers(request: Request, route: str | None = None, since_days: int = 7):
-    url = f"{GATEWAY}/api/v1/usage/top-callers?since_days={since_days}"
+async def usage_top_callers(
+    request: Request,
+    route: str | None = None,
+    since_days: int = 7,
+    limit: int = 20,
+):
+    url = f"{GATEWAY}/api/v1/usage/top-callers?since_days={since_days}&limit={limit}"
     if route:
-        url += f"&route={route}"
+        url += f"&route={quote(route, safe='')}"
     return await _proxy(_client(request), url)
+
+
+@app.get("/api/usage/service-health")
+async def usage_service_health(request: Request, since_days: int = 7):
+    return await _proxy(
+        _client(request),
+        f"{GATEWAY}/api/v1/usage/service-health?since_days={since_days}",
+    )
+
+
+@app.get("/api/usage/error-rates")
+async def usage_error_rates(
+    request: Request,
+    since_days: int = 7,
+    min_calls: int = 1,
+    limit: int = 30,
+):
+    return await _proxy(
+        _client(request),
+        f"{GATEWAY}/api/v1/usage/error-rates?since_days={since_days}&min_calls={min_calls}&limit={limit}",
+    )
+
+
+@app.get("/api/usage/latency-percentiles")
+async def usage_latency_percentiles(
+    request: Request,
+    since_days: int = 7,
+    min_calls: int = 5,
+    route_limit: int = 20,
+):
+    return await _proxy(
+        _client(request),
+        f"{GATEWAY}/api/v1/usage/latency-percentiles?since_days={since_days}&min_calls={min_calls}&route_limit={route_limit}",
+    )
 
 
 @app.get("/api/contracts/current")
 async def contracts_current(request: Request):
     return await _proxy(_client(request), f"{GATEWAY}/api/v1/contracts/current")
+
+
+@app.get("/api/contracts/service-graph")
+async def contracts_service_graph(request: Request):
+    return await _proxy(_client(request), f"{GATEWAY}/api/v1/contracts/service-graph")
+
+
+@app.get("/api/contracts/guardrails")
+async def contracts_guardrails(request: Request):
+    return await _proxy(_client(request), f"{GATEWAY}/api/v1/contracts/guardrails")
 
 
 @app.get("/api/contracts/changes")
