@@ -251,7 +251,7 @@ async def create_session(request: Request):
 
     # Ensure the new required fields are present with sensible defaults.
     body.setdefault("compliance_level", DEFAULT_COMPLIANCE_LEVEL)
-    body.setdefault("data_residency", DEFAULT_DATA_RESIDENCY)
+    body.setdefault("data_residency", settings.default_data_residency)
 
     # Validate enum values before forwarding.
     if body["compliance_level"] not in VALID_COMPLIANCE_LEVELS:
