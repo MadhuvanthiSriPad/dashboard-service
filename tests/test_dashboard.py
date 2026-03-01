@@ -17,6 +17,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "completed",
         "priority": "high",
+        "compliance_level": "soc2",
         "data_residency": "us",
         "usage": {"input_tokens": 10000, "output_tokens": 5420, "cache_read_tokens": 0},
         "billing": {"total_usd": 0.0231},
@@ -33,6 +34,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "running",
         "priority": "medium",
+        "compliance_level": "none",
         "data_residency": "eu",
         "usage": {"input_tokens": 5000, "output_tokens": 3200, "cache_read_tokens": 0},
         "billing": {"total_usd": 0.0164},
@@ -49,6 +51,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "failed",
         "priority": "low",
+        "compliance_level": "hipaa",
         "data_residency": "ap",
         "usage": {"input_tokens": 2000, "output_tokens": 1100, "cache_read_tokens": 0},
         "billing": {"total_usd": 0.0047},
@@ -184,6 +187,8 @@ async def test_dashboard(transport, mock_client):
     assert "id" in session
     assert "agent" in session
     assert "total_tokens" in session
+    assert "compliance_level" in session
+    assert session["compliance_level"] in ("soc2", "none", "hipaa", "fedramp", "")
     assert "data_residency" in session
     assert session["data_residency"] in ("us", "eu", "ap")
 
@@ -201,6 +206,7 @@ async def test_sessions(transport, mock_client):
     assert session["id"] == "sess-001"
     assert session["agent"] == "code-review-bot"
     assert session["total_tokens"] == 15420  # 10000 + 5420
+    assert session["compliance_level"] == "soc2"
     assert session["data_residency"] == "us"
 
 
@@ -300,6 +306,7 @@ async def test_create_session_proxies_with_data_residency(transport, mock_client
         "model": "gpt-4o",
         "status": "running",
         "priority": "high",
+        "compliance_level": "soc2",
         "data_residency": "eu",
         "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
         "billing": {"total": 0},
@@ -320,23 +327,26 @@ async def test_create_session_proxies_with_data_residency(transport, mock_client
                 "agent_name": "new-agent",
                 "model": "gpt-4o",
                 "priority": "high",
+                "compliance_level": "soc2",
                 "data_residency": "eu",
             },
         )
-    assert resp.status_code == 201
+    assert resp.status_code == 200
     data = resp.json()
     assert data["session_id"] == "sess-new"
+    assert data["compliance_level"] == "soc2"
     assert data["data_residency"] == "eu"
 
-    # Verify the POST was forwarded with data_residency in the body
+    # Verify the POST was forwarded with both required fields in the body
     call_kwargs = mock_client.post.call_args
     forwarded_body = call_kwargs.kwargs.get("json", {})
+    assert forwarded_body["compliance_level"] == "soc2"
     assert forwarded_body["data_residency"] == "eu"
 
 
 @pytest.mark.asyncio
-async def test_create_session_injects_default_data_residency(transport, mock_client):
-    """POST /api/sessions should inject default data_residency when not provided."""
+async def test_create_session_defaults_required_fields(transport, mock_client):
+    """POST /api/sessions should inject default compliance_level and data_residency when omitted."""
     created_session = {
         "session_id": "sess-new2",
         "team_id": "team-2",
@@ -344,6 +354,7 @@ async def test_create_session_injects_default_data_residency(transport, mock_cli
         "model": "gpt-4o",
         "status": "running",
         "priority": "medium",
+        "compliance_level": "none",
         "data_residency": "us",
         "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
         "billing": {"total": 0},
@@ -366,12 +377,49 @@ async def test_create_session_injects_default_data_residency(transport, mock_cli
                 "priority": "medium",
             },
         )
-    assert resp.status_code == 201
+    assert resp.status_code == 200
 
-    # Verify data_residency was injected with the default value
+    # Verify both required fields were injected with defaults
     call_kwargs = mock_client.post.call_args
     forwarded_body = call_kwargs.kwargs.get("json", {})
+    assert forwarded_body["compliance_level"] == "none"
     assert forwarded_body["data_residency"] == "us"
+
+
+@pytest.mark.asyncio
+async def test_create_session_rejects_invalid_compliance_level(transport, mock_client):
+    """POST /api/sessions should reject invalid compliance_level values."""
+    app.state.http_client = mock_client
+
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/sessions",
+            json={
+                "team_id": "team-1",
+                "agent_name": "bad-agent",
+                "compliance_level": "invalid",
+                "data_residency": "us",
+            },
+        )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_session_rejects_invalid_data_residency(transport, mock_client):
+    """POST /api/sessions should reject invalid data_residency values."""
+    app.state.http_client = mock_client
+
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/sessions",
+            json={
+                "team_id": "team-1",
+                "agent_name": "bad-agent",
+                "compliance_level": "soc2",
+                "data_residency": "invalid",
+            },
+        )
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
