@@ -339,7 +339,7 @@ function WaveGraph({ graph, jobs, serviceHealth = [] }) {
         <defs>
           {/* Arrowhead marker */}
           <marker id="arrow" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,3.5 L0,7 Z" fill={C.accentLt} fillOpacity="0.6" />
+            <path d="M0,0 L10,3.5 L0,7 Z" fill={C.accentLt} fillOpacity="0.85" />
           </marker>
           {/* Flow particle */}
           <circle id="flowDot" r="3" fill={C.accentLt} />
@@ -348,7 +348,7 @@ function WaveGraph({ graph, jobs, serviceHealth = [] }) {
         {/* Edge paths with flowing particles */}
         {edgePaths.map(ep => (
           <g key={ep.key}>
-            <path d={ep.d} fill="none" stroke={ep.color} strokeWidth="1.5" strokeOpacity="0.35" markerEnd="url(#arrow)" />
+            <path d={ep.d} fill="none" stroke={ep.color} strokeWidth="2" strokeOpacity="0.6" markerEnd="url(#arrow)" />
             {/* Animated flow dot */}
             <use href="#flowDot" fill={ep.color} opacity="0.7">
               <animateMotion dur="2.5s" repeatCount="indefinite" path={ep.d} />
