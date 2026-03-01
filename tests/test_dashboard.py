@@ -17,6 +17,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "completed",
         "priority": "high",
+        "data_residency": "us",
         "usage": {"input_tokens": 10000, "output_tokens": 5420, "cache_read_tokens": 0},
         "billing": {"total_usd": 0.0231},
         "started_at": "2026-02-20T10:00:00+00:00",
@@ -32,6 +33,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "running",
         "priority": "medium",
+        "data_residency": "eu",
         "usage": {"input_tokens": 5000, "output_tokens": 3200, "cache_read_tokens": 0},
         "billing": {"total_usd": 0.0164},
         "started_at": "2026-02-20T11:00:00+00:00",
@@ -47,6 +49,7 @@ MOCK_SESSIONS = [
         "model": "gpt-4o",
         "status": "failed",
         "priority": "low",
+        "data_residency": "ap",
         "usage": {"input_tokens": 2000, "output_tokens": 1100, "cache_read_tokens": 0},
         "billing": {"total_usd": 0.0047},
         "started_at": "2026-02-20T12:00:00+00:00",
@@ -149,6 +152,8 @@ async def test_dashboard(transport, mock_client):
     assert "id" in session
     assert "agent" in session
     assert "total_tokens" in session
+    assert "data_residency" in session
+    assert session["data_residency"] in ("us", "eu", "ap")
 
 
 @pytest.mark.asyncio
@@ -164,6 +169,7 @@ async def test_sessions(transport, mock_client):
     assert session["id"] == "sess-001"
     assert session["agent"] == "code-review-bot"
     assert session["total_tokens"] == 15420  # 10000 + 5420
+    assert session["data_residency"] == "us"
 
 
 @pytest.mark.asyncio
@@ -217,6 +223,90 @@ async def test_dashboard_with_upstream_failure(transport):
     assert data["stats"]["total_sessions"] == 0
     assert data["stats"]["active_sessions"] == 0
     assert data["cost_by_team"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_session_proxies_with_data_residency(transport, mock_client):
+    """POST /api/sessions should forward body including data_residency to api-core."""
+    created_session = {
+        "session_id": "sess-new",
+        "team_id": "team-1",
+        "agent_name": "new-agent",
+        "model": "gpt-4o",
+        "status": "running",
+        "priority": "high",
+        "data_residency": "eu",
+        "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
+        "billing": {"total": 0},
+        "started_at": "2026-02-20T13:00:00+00:00",
+        "ended_at": None,
+        "duration_seconds": 0,
+        "error_message": None,
+        "tags": None,
+    }
+    mock_client.post = AsyncMock(return_value=_mock_response(created_session))
+    app.state.http_client = mock_client
+
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/sessions",
+            json={
+                "team_id": "team-1",
+                "agent_name": "new-agent",
+                "model": "gpt-4o",
+                "priority": "high",
+                "data_residency": "eu",
+            },
+        )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["session_id"] == "sess-new"
+    assert data["data_residency"] == "eu"
+
+    # Verify the POST was forwarded with data_residency in the body
+    call_kwargs = mock_client.post.call_args
+    forwarded_body = call_kwargs.kwargs.get("json", {})
+    assert forwarded_body["data_residency"] == "eu"
+
+
+@pytest.mark.asyncio
+async def test_create_session_injects_default_data_residency(transport, mock_client):
+    """POST /api/sessions should inject default data_residency when not provided."""
+    created_session = {
+        "session_id": "sess-new2",
+        "team_id": "team-2",
+        "agent_name": "deploy-bot",
+        "model": "gpt-4o",
+        "status": "running",
+        "priority": "medium",
+        "data_residency": "us",
+        "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
+        "billing": {"total": 0},
+        "started_at": "2026-02-20T14:00:00+00:00",
+        "ended_at": None,
+        "duration_seconds": 0,
+        "error_message": None,
+        "tags": None,
+    }
+    mock_client.post = AsyncMock(return_value=_mock_response(created_session))
+    app.state.http_client = mock_client
+
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/sessions",
+            json={
+                "team_id": "team-2",
+                "agent_name": "deploy-bot",
+                "model": "gpt-4o",
+                "priority": "medium",
+            },
+        )
+    assert resp.status_code == 201
+
+    # Verify data_residency was injected with the default value
+    call_kwargs = mock_client.post.call_args
+    forwarded_body = call_kwargs.kwargs.get("json", {})
+    assert forwarded_body["data_residency"] == "us"
 
 
 @pytest.mark.asyncio

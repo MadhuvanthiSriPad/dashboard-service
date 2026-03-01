@@ -7,15 +7,22 @@ const STATUS_STYLES = {
   failed:    { bg: 'rgba(239, 68, 68, 0.1)',  color: '#ef4444', border: 'rgba(239, 68, 68, 0.3)' },
 };
 
+const REGION_STYLES = {
+  us: { bg: 'rgba(99, 102, 241, 0.1)', color: '#818cf8', border: 'rgba(99, 102, 241, 0.3)', label: 'US' },
+  eu: { bg: 'rgba(34, 197, 94, 0.1)',  color: '#22c55e', border: 'rgba(34, 197, 94, 0.3)',  label: 'EU' },
+  ap: { bg: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b', border: 'rgba(245, 158, 11, 0.3)', label: 'AP' },
+};
+
 const COLUMNS = [
-  { key: 'id',           label: 'Session ID' },
-  { key: 'agent',        label: 'Agent' },
-  { key: 'model',        label: 'Model' },
-  { key: 'team',         label: 'Team' },
-  { key: 'status',       label: 'Status' },
-  { key: 'total_tokens', label: 'Tokens' },
-  { key: 'cost',         label: 'Cost' },
-  { key: 'duration_ms',  label: 'Duration' },
+  { key: 'id',              label: 'Session ID' },
+  { key: 'agent',           label: 'Agent' },
+  { key: 'model',           label: 'Model' },
+  { key: 'team',            label: 'Team' },
+  { key: 'status',          label: 'Status' },
+  { key: 'data_residency',  label: 'Region' },
+  { key: 'total_tokens',    label: 'Tokens' },
+  { key: 'cost',            label: 'Cost' },
+  { key: 'duration_ms',     label: 'Duration' },
 ];
 
 const styles = {
@@ -164,6 +171,14 @@ export default function SessionsTable({ sessions }) {
           <span style={{ ...styles.badge, background: s.bg, color: s.color, border: `1px solid ${s.border}` }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: s.color, display: 'inline-block' }} />
             {val}
+          </span>
+        );
+      }
+      case 'data_residency': {
+        const r = REGION_STYLES[val] || REGION_STYLES.us;
+        return (
+          <span style={{ ...styles.badge, background: r.bg, color: r.color, border: `1px solid ${r.border}` }}>
+            {r.label}
           </span>
         );
       }

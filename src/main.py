@@ -74,6 +74,25 @@ async def _proxy(client: httpx.AsyncClient, url: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+async def _proxy_post(client: httpx.AsyncClient, url: str, json_body: dict):
+    """Proxy a POST request and return JSON, raising HTTPException on failure."""
+    try:
+        resp = await client.post(url, json=json_body)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.ConnectError:
+        logger.warning("Upstream unreachable: %s", url)
+        raise HTTPException(status_code=502, detail=f"Upstream unreachable: {url}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Upstream error: {exc.response.text}",
+        )
+    except Exception as exc:
+        logger.exception("Proxy POST error for %s", url)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 async def _fetch_team_names(client: httpx.AsyncClient) -> dict[str, dict]:
     """Fetch teams from gateway and return a dict keyed by team_id."""
     try:
@@ -103,6 +122,7 @@ def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
         "model": s.get("model", ""),
         "team": team_info.get("name", team_id),
         "status": s.get("status", ""),
+        "data_residency": s.get("data_residency", settings.default_data_residency),
         "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0) + cached_tokens,
         "cost": total_cost,
         "duration_ms": int(duration_s * 1000) if duration_s else None,
@@ -202,6 +222,17 @@ async def list_sessions(request: Request):
     sessions = raw if isinstance(raw, list) else raw.get("sessions", [])
     team_names = await _fetch_team_names(client)
     return {"sessions": [_transform_session(s, team_names) for s in sessions]}
+
+
+@app.post("/api/sessions", status_code=201)
+async def create_session(request: Request):
+    """Proxy session creation to api-core, injecting data_residency if missing."""
+    client = _client(request)
+    body = await request.json()
+    # Ensure the required data_residency field is present
+    if "data_residency" not in body or not body["data_residency"]:
+        body["data_residency"] = settings.default_data_residency
+    return await _proxy_post(client, f"{GATEWAY}/api/v1/sessions", body)
 
 
 @app.get("/api/sessions/{session_id}")
