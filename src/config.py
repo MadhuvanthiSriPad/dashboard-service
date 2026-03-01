@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     api_version: str = "1.0.0"
     debug: bool = False
     default_max_cost_usd: float = 100.0
+    default_data_residency: str = "us"
 
     model_config = {"env_prefix": "DASHBOARD_"}
 

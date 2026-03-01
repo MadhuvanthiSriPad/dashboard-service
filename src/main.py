@@ -74,6 +74,25 @@ async def _proxy(client: httpx.AsyncClient, url: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+async def _proxy_post(client: httpx.AsyncClient, url: str, json_body: dict):
+    """Proxy a POST request and return JSON, raising HTTPException on failure."""
+    try:
+        resp = await client.post(url, json=json_body)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.ConnectError:
+        logger.warning("Upstream unreachable: %s", url)
+        raise HTTPException(status_code=502, detail=f"Upstream unreachable: {url}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Upstream error: {exc.response.text}",
+        )
+    except Exception as exc:
+        logger.exception("Proxy POST error for %s", url)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 async def _fetch_team_names(client: httpx.AsyncClient) -> dict[str, dict]:
     """Fetch teams from gateway and return a dict keyed by team_id."""
     try:
@@ -86,6 +105,16 @@ async def _fetch_team_names(client: httpx.AsyncClient) -> dict[str, dict]:
     except HTTPException:
         pass
     return {}
+
+
+# Valid values for the new required fields on POST /api/v1/sessions.
+VALID_COMPLIANCE_LEVELS = ("none", "soc2", "hipaa", "fedramp")
+VALID_DATA_RESIDENCY = ("us", "eu", "ap")
+
+# Sensible defaults used when the dashboard proxies session-creation requests
+# and the caller does not supply these fields explicitly.
+DEFAULT_COMPLIANCE_LEVEL = "none"
+DEFAULT_DATA_RESIDENCY = "us"
 
 
 def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
@@ -103,6 +132,8 @@ def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
         "model": s.get("model", ""),
         "team": team_info.get("name", team_id),
         "status": s.get("status", ""),
+        "compliance_level": s.get("compliance_level", ""),
+        "data_residency": s.get("data_residency", settings.default_data_residency),
         "total_tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0) + cached_tokens,
         "cost": total_cost,
         "duration_ms": int(duration_s * 1000) if duration_s else None,
@@ -202,6 +233,50 @@ async def list_sessions(request: Request):
     sessions = raw if isinstance(raw, list) else raw.get("sessions", [])
     team_names = await _fetch_team_names(client)
     return {"sessions": [_transform_session(s, team_names) for s in sessions]}
+
+
+@app.post("/api/sessions")
+async def create_session(request: Request):
+    """Proxy session creation to api-core, injecting required fields.
+
+    The upstream POST /api/v1/sessions now requires ``compliance_level`` and
+    ``data_residency``.  If the caller omits them we fall back to sensible
+    defaults so existing integrations do not break.
+    """
+    client = _client(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Ensure the new required fields are present with sensible defaults.
+    body.setdefault("compliance_level", DEFAULT_COMPLIANCE_LEVEL)
+    body.setdefault("data_residency", settings.default_data_residency)
+
+    # Validate enum values before forwarding.
+    if body["compliance_level"] not in VALID_COMPLIANCE_LEVELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"compliance_level must be one of {VALID_COMPLIANCE_LEVELS}",
+        )
+    if body["data_residency"] not in VALID_DATA_RESIDENCY:
+        raise HTTPException(
+            status_code=422,
+            detail=f"data_residency must be one of {VALID_DATA_RESIDENCY}",
+        )
+
+    try:
+        resp = await client.post(f"{GATEWAY}/api/v1/sessions", json=body)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.ConnectError:
+        logger.warning("Upstream unreachable: %s", GATEWAY)
+        raise HTTPException(status_code=502, detail=f"Upstream unreachable: {GATEWAY}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Upstream error: {exc.response.text}",
+        )
 
 
 @app.get("/api/sessions/{session_id}")
