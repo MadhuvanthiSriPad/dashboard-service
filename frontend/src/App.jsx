@@ -10,10 +10,10 @@ const ANALYTICS_DAYS = 14;
 const ANALYTICS_HOURS = ANALYTICS_DAYS * 24;
 const HEADERS = API_KEY ? { "X-API-Key": API_KEY } : {};
 const SHELL = {
-  sidebarW: 196,
-  headerPad: 16,
-  pagePad: 14,
-  contentMax: 1320,
+  sidebarW: 220,
+  headerPad: 24,
+  pagePad: 20,
+  contentMax: 1600,
 };
 const C = {
   bg: "#0b0d15", card: "#111827", surface: "#111827",
