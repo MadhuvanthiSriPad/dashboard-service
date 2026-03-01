@@ -71,6 +71,34 @@ MOCK_BILLING_SUMMARY = {
     "period": "2026-02",
 }
 
+MOCK_CONTRACT_CHANGE_DETAIL = {
+    "id": 42,
+    "severity": "low",
+    "summary_json": '{"summary": "Non-breaking changes detected"}',
+    "changed_routes_json": '["GET /api/v1/contracts/changes/{change_id}"]',
+    "source_repo": "api-core",
+    "affected_services": 2,
+    "remediation_status": "in_progress",
+    "created_at": "2026-02-28T10:00:00+00:00",
+    "impact_sets": [
+        {
+            "caller_service": "dashboard-service",
+            "route_template": "/api/v1/contracts/changes/{change_id}",
+            "method": "GET",
+            "calls_last_7d": 150,
+            "confidence": "high",
+        },
+        {
+            "caller_service": "analytics-service",
+            "route_template": "/api/v1/contracts/changes/{change_id}",
+            "method": None,
+            "calls_last_7d": 42,
+            "confidence": "medium",
+        },
+    ],
+    "remediation_jobs": [],
+}
+
 MOCK_TEAMS = [
     {"id": "team-1", "name": "platform", "plan": "enterprise", "monthly_budget": 500.0, "created_at": "2026-01-01T00:00:00+00:00", "session_count": 340, "total_cost": 124.56},
     {"id": "team-2", "name": "infra", "plan": "pro", "monthly_budget": 300.0, "created_at": "2026-01-01T00:00:00+00:00", "session_count": 210, "total_cost": 89.23},
@@ -108,6 +136,10 @@ def mock_client():
             return _mock_response(MOCK_TEAMS)
         if "/api/v1/sessions/sess-001" in url:
             return _mock_response(MOCK_SESSIONS[0])
+        if "/api/v1/contracts/changes/" in url:
+            return _mock_response(MOCK_CONTRACT_CHANGE_DETAIL)
+        if "/api/v1/contracts/changes" in url:
+            return _mock_response([MOCK_CONTRACT_CHANGE_DETAIL])
         return _mock_response({"detail": "Not found"}, 404)
 
     client.get = AsyncMock(side_effect=mock_get)
@@ -207,6 +239,39 @@ async def test_cost_by_team(transport, mock_client):
     # api-core returns cost-by-team as a flat list
     assert len(data) == 3
     assert data[0]["team_id"] == "team-1"
+
+
+@pytest.mark.asyncio
+async def test_contract_change_detail(transport, mock_client):
+    """Contract change detail should proxy the response including the new method field in impact_sets."""
+    app.state.http_client = mock_client
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/api/contracts/changes/42")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["id"] == 42
+    assert data["severity"] == "low"
+    # Verify impact_sets include the new method field
+    assert len(data["impact_sets"]) == 2
+    assert data["impact_sets"][0]["method"] == "GET"
+    assert data["impact_sets"][0]["caller_service"] == "dashboard-service"
+    assert data["impact_sets"][0]["calls_last_7d"] == 150
+    # Second entry has nullable method
+    assert data["impact_sets"][1]["method"] is None
+    assert data["impact_sets"][1]["caller_service"] == "analytics-service"
+
+
+@pytest.mark.asyncio
+async def test_contract_changes_list(transport, mock_client):
+    """Contract changes list should proxy the response."""
+    app.state.http_client = mock_client
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/api/contracts/changes")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["id"] == 42
 
 
 @pytest.mark.asyncio
