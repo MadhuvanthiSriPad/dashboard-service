@@ -15,7 +15,7 @@ const severityConfig = {
 };
 
 const remediationConfig = {
-  all_green:   { color: '#22c55e', bg: 'rgba(34,197,94,0.12)',    label: 'All Green' },
+  all_merged:  { color: '#22c55e', bg: 'rgba(34,197,94,0.12)',    label: 'All Merged' },
   in_progress: { color: '#3b82f6', bg: 'rgba(59,130,246,0.12)',   label: 'In Progress' },
   needs_human: { color: '#f97316', bg: 'rgba(249,115,22,0.12)',   label: 'Needs Human' },
   pending:     { color: '#64748b', bg: 'rgba(100,116,139,0.12)',  label: 'Pending' },
@@ -24,10 +24,10 @@ const remediationConfig = {
 const jobStatusConfig = {
   queued:      { color: '#64748b', bg: 'rgba(100,116,139,0.15)', icon: Clock,        label: 'Queued' },
   running:     { color: '#eab308', bg: 'rgba(234,179,8,0.15)',   icon: Loader2,      label: 'Running' },
-  pr_opened:   { color: '#3b82f6', bg: 'rgba(59,130,246,0.15)',  icon: GitPullRequest,label: 'PR Opened' },
-  ci_failed:   { color: '#ef4444', bg: 'rgba(239,68,68,0.15)',   icon: XCircle,      label: 'CI Failed' },
-  needs_human: { color: '#f97316', bg: 'rgba(249,115,22,0.15)',  icon: AlertCircle,  label: 'Needs Human' },
-  green:       { color: '#22c55e', bg: 'rgba(34,197,94,0.15)',   icon: CheckCircle2, label: 'Green' },
+  awaiting_merge: { color: '#3b82f6', bg: 'rgba(59,130,246,0.15)',  icon: GitPullRequest,label: 'Awaiting Merge' },
+  ci_failed:      { color: '#ef4444', bg: 'rgba(239,68,68,0.15)',   icon: XCircle,      label: 'CI Failed' },
+  needs_human:    { color: '#f97316', bg: 'rgba(249,115,22,0.15)',  icon: AlertCircle,  label: 'Needs Human' },
+  merged:         { color: '#22c55e', bg: 'rgba(34,197,94,0.15)',   icon: CheckCircle2, label: 'Merged' },
 };
 
 function relativeTime(isoStr) {

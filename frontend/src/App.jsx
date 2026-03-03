@@ -26,10 +26,10 @@ const MONO = "ui-monospace,SFMono-Regular,'Cascadia Code',Menlo,monospace";
 const STATUS = {
   queued:      { color: C.muted,   label: "Queued" },
   running:     { color: C.yellow,  label: "Running" },
-  pr_opened:   { color: C.accent,  label: "PR Opened" },
-  ci_failed:   { color: C.red,     label: "CI Failed" },
-  needs_human: { color: C.yellow,  label: "Needs Human" },
-  green:       { color: C.green,   label: "Green" },
+  awaiting_merge: { color: C.accent,  label: "Awaiting Merge" },
+  ci_failed:      { color: C.red,     label: "CI Failed" },
+  needs_human:    { color: C.yellow,  label: "Needs Human" },
+  merged:         { color: C.green,   label: "Merged" },
 };
 const SEV = {
   critical: { color: C.red }, high: { color: C.red },
@@ -41,7 +41,6 @@ const PIPE = [
   { key: "plan",     label: "Plan",     desc: "Wave ordering" },
   { key: "dispatch", label: "Dispatch", desc: "Agent launch" },
   { key: "fix",      label: "Fix",      desc: "Code changes" },
-  { key: "verify",   label: "Verify",   desc: "CI + review" },
   { key: "notify",   label: "Notify",   desc: "Stakeholder alert" },
 ];
 const NAV = [
@@ -132,23 +131,22 @@ function hasNotificationSignal(detail, jobs) {
 function pipeStatus(d, jobs) {
   if (!d) return PIPE.map(s => ({ ...s, status: "waiting", statusText: "" }));
   const has = jobs.length > 0;
-  const allG = has && jobs.every(j => j.status === "green");
+  const allG = has && jobs.every(j => j.status === "merged" || j.status === "awaiting_merge");
   const anyQueued = has && jobs.some(j => j.status === "queued");
   const anyRunning = has && jobs.some(j => j.status === "running");
   const anyCIFailed = has && jobs.some(j => j.status === "ci_failed");
   const anyNeedsHuman = has && jobs.some(j => j.status === "needs_human");
-  const anyVerificationSignal = has && jobs.some(j => j.pr_url || ["pr_opened", "ci_failed", "needs_human", "green"].includes(j.status));
+  const anyVerificationSignal = has && jobs.some(j => j.pr_url || ["awaiting_merge", "ci_failed", "needs_human", "merged"].includes(j.status));
   const notificationSent = hasNotificationSignal(d, jobs);
   const prCount = jobs.filter(j => j.pr_url).length;
-  const greenCount = jobs.filter(j => j.status === "green").length;
+  const mergedCount = jobs.filter(j => j.status === "merged").length;
   const runningCount = jobs.filter(j => j.status === "running").length;
   const queuedCount = jobs.filter(j => j.status === "queued").length;
   // Determine single current stage from live job state.
   let current;
   if (notificationSent) current = "notify";
   else if (allG) current = "notify";
-  else if (anyVerificationSignal) current = "verify";
-  else if (anyRunning || anyQueued) current = "fix";
+  else if (anyVerificationSignal || anyRunning || anyQueued) current = "fix";
   else if (has) current = "dispatch";
   else if (d) current = "dispatch";
   else current = "analyze";
@@ -159,10 +157,9 @@ function pipeStatus(d, jobs) {
     plan: d?.impact_sets?.length > 0 ? `${d.impact_sets.length} wave${d.impact_sets.length !== 1 ? "s" : ""}` : "",
     dispatch: has ? `${jobs.length} job${jobs.length !== 1 ? "s" : ""} launched` : "",
     fix: has
-      ? (anyRunning ? `${runningCount} running` : anyQueued ? `${queuedCount} queued` : prCount > 0 ? `${prCount} PR${prCount !== 1 ? "s" : ""} open` : "")
+      ? (anyRunning ? `${runningCount} running` : anyQueued ? `${queuedCount} queued` : allG ? "Code changes" : anyNeedsHuman ? "Needs review" : anyCIFailed ? "CI failed" : prCount > 0 ? `${prCount} PR${prCount !== 1 ? "s" : ""} open` : "")
       : "",
-    verify: allG ? "All green" : (anyNeedsHuman ? "Needs review" : anyCIFailed ? "CI failed" : greenCount > 0 ? `${greenCount}/${jobs.length} passed` : prCount > 0 ? `${prCount} in review` : ""),
-    notify: notificationSent ? "Sent" : allG ? "Pending send" : "",
+    notify: notificationSent ? "Sent" : allG ? "Stakeholder alert" : "",
   };
   return PIPE.map((s, i) => {
     const statusText = statusTexts[s.key] || "";
@@ -171,9 +168,8 @@ function pipeStatus(d, jobs) {
       (s.key === "analyze" && (Boolean(d?.affected_services) || Boolean(d?.impact_sets?.length) || has)) ||
       (s.key === "plan" && (Boolean(d?.impact_sets?.length) || has)) ||
       (s.key === "dispatch" && has) ||
-      (s.key === "fix" && has && !anyQueued && !anyRunning && anyVerificationSignal) ||
-      (s.key === "verify" && allG) ||
-      (s.key === "notify" && notificationSent);
+      (s.key === "fix" && allG) ||
+      (s.key === "notify" && (notificationSent || allG));
 
     if (done) return { ...s, status: "done", statusText };
     if (s.key === current) return { ...s, status: "active", statusText };
@@ -467,6 +463,8 @@ export default function App() {
   const [changes, setChanges] = useState([]);
   const [selId, setSelId] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [demoStatus, setDemoStatus] = useState(null);
+  const [demoBusy, setDemoBusy] = useState(false);
   const [graph, setGraph] = useState(null);
   const [guard, setGuard] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -483,6 +481,62 @@ export default function App() {
   const [errorRates, setErrorRates] = useState([]);
   const [latencyData, setLatencyData] = useState([]);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [simulation, setSimulation] = useState(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyRes, setVerifyRes] = useState(null);
+
+  async function refreshDemoStatus() {
+    try {
+      const r = await fetch(`${API}/contracts/demo/status`, { headers: HEADERS });
+      if (r.ok) setDemoStatus(await r.json());
+    } catch {
+      setDemoStatus(null);
+    }
+  }
+
+  async function refreshContractState(preferredId = null) {
+    let nextSelectedId = preferredId ?? selId;
+
+    try {
+      const changesResp = await fetch(`${API}/contracts/changes`, { headers: HEADERS });
+      if (changesResp.ok) {
+        const payload = await changesResp.json();
+        if (Array.isArray(payload)) {
+          setChanges(payload);
+          if (!payload.length) {
+            nextSelectedId = null;
+          } else if (preferredId != null && payload.some(change => change.id === preferredId)) {
+            nextSelectedId = preferredId;
+          } else if (nextSelectedId != null && payload.some(change => change.id === nextSelectedId)) {
+            nextSelectedId = nextSelectedId;
+          } else {
+            nextSelectedId = payload[0].id;
+          }
+          setSelId(nextSelectedId);
+        }
+      }
+
+      if (nextSelectedId == null) {
+        setDetail(null);
+        setSimulation(null);
+      } else {
+        const [detailResp, simulationResp] = await Promise.all([
+          fetch(`${API}/contracts/changes/${nextSelectedId}`, { headers: HEADERS }),
+          fetch(`${API}/contracts/changes/${nextSelectedId}/simulation`, { headers: HEADERS }),
+        ]);
+
+        if (detailResp.ok) setDetail(await detailResp.json());
+        else setDetail(null);
+
+        if (simulationResp.ok) setSimulation(await simulationResp.json());
+        else setSimulation(null);
+      }
+
+      setLastRef(new Date());
+    } catch (e) {
+      setSyncRes({ error: String(e) });
+    }
+  }
 
   /* Fetch changes + poll */
   useEffect(() => {
@@ -503,6 +557,29 @@ export default function App() {
     const ac = new AbortController();
     async function tick() { try { const r = await fetch(`${API}/contracts/changes/${selId}`, { signal: ac.signal, headers: HEADERS }); if (r.ok) setDetail(await r.json()) } catch (e) { if (e.name === "AbortError") return } }
     tick(); const id = setInterval(tick, POLL_MS); return () => { ac.abort(); clearInterval(id) };
+  }, [selId]);
+
+  /* Demo status poll */
+  useEffect(() => {
+    const ac = new AbortController();
+    async function tick() {
+      try {
+        const r = await fetch(`${API}/contracts/demo/status`, { signal: ac.signal, headers: HEADERS });
+        if (r.ok) setDemoStatus(await r.json());
+      } catch (e) {
+        if (e.name === "AbortError") return;
+        setDemoStatus(null);
+      }
+    }
+    tick(); const id = setInterval(tick, POLL_MS); return () => { ac.abort(); clearInterval(id) };
+  }, []);
+
+  /* Fetch simulation when change is selected */
+  useEffect(() => {
+    if (selId == null) { setSimulation(null); return }
+    const ac = new AbortController();
+    async function tick() { try { const r = await fetch(`${API}/contracts/changes/${selId}/simulation`, { signal: ac.signal, headers: HEADERS }); if (r.ok) setSimulation(await r.json()); else setSimulation(null) } catch (e) { if (e.name === "AbortError") return; setSimulation(null) } }
+    tick(); return () => ac.abort();
   }, [selId]);
 
   /* One-time fetches */
@@ -589,10 +666,60 @@ export default function App() {
         const err = parseSyncResponse(await sr.json().catch(() => ({})));
         setSyncRes({ error: err.message });
       }
-      const cr = await fetch(`${API}/contracts/changes`, { headers: HEADERS }); if (cr.ok) { const d = await cr.json(); if (Array.isArray(d)) setChanges(d) }
-      if (selId != null) { const dr = await fetch(`${API}/contracts/changes/${selId}`, { headers: HEADERS }); if (dr.ok) setDetail(await dr.json()) }
-      setLastRef(new Date());
+      await refreshContractState();
+      await refreshDemoStatus();
     } catch (e) { setSyncRes({ error: String(e) }) } finally { setSyncing(false) }
+  }
+
+  async function handleDemoAdvance() {
+    if (demoBusy) return;
+    setDemoBusy(true); setSyncRes(null);
+    try {
+      const r = await fetch(`${API}/contracts/demo/advance`, { method: "POST", headers: HEADERS });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setSyncRes({ error: data?.detail?.message || data?.detail || "Unable to advance demo" });
+        return;
+      }
+      setDemoStatus(data);
+      await refreshContractState(data.change_id ?? null);
+      await refreshDemoStatus();
+    } catch (e) {
+      setSyncRes({ error: String(e) });
+    } finally {
+      setDemoBusy(false);
+    }
+  }
+
+  async function handleDemoReset() {
+    if (demoBusy) return;
+    setDemoBusy(true); setSyncRes(null);
+    try {
+      const r = await fetch(`${API}/contracts/demo/reset`, { method: "POST", headers: HEADERS });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setSyncRes({ error: data?.detail?.message || data?.detail || "Unable to reset demo" });
+        return;
+      }
+      setDemoStatus(data);
+      await refreshContractState(null);
+      await refreshDemoStatus();
+    } catch (e) {
+      setSyncRes({ error: String(e) });
+    } finally {
+      setDemoBusy(false);
+    }
+  }
+
+  /* Verify high-risk handler */
+  async function handleVerify() {
+    if (!selId || verifying) return;
+    setVerifying(true); setVerifyRes(null);
+    try {
+      const r = await fetch(`${API}/contracts/changes/${selId}/simulation/verify`, { method: "POST", headers: HEADERS });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) { setVerifyRes({ ok: true, ...data }) } else { setVerifyRes({ error: data?.detail?.message || data?.detail || "Verify failed" }) }
+    } catch (e) { setVerifyRes({ error: String(e) }) } finally { setVerifying(false) }
   }
 
   /* Derived */
@@ -603,19 +730,19 @@ export default function App() {
   const impactRows = useMemo(() => detail?.impact_sets ? [...detail.impact_sets].sort((a, b) => (Number(b.calls_last_7d) || 0) - (Number(a.calls_last_7d) || 0)) : [], [detail]);
   const jobs = useMemo(() => detail?.remediation_jobs || [], [detail]);
   const auditAll = useMemo(() => jobs.flatMap(j => (j.audit_entries || []).map(e => ({ ...e, target_repo: j.target_repo, service: rn(j.target_repo) }))).sort((a, b) => new Date(b.changed_at) - new Date(a.changed_at)), [jobs]);
-  const greenJobs = useMemo(() => jobs.filter(j => j.status === "green"), [jobs]);
+  const mergedJobs = useMemo(() => jobs.filter(j => j.status === "merged"), [jobs]);
+  const passedJobs = useMemo(() => jobs.filter(j => ["awaiting_merge", "merged"].includes(j.status)), [jobs]);
   const activeJobs = useMemo(() => jobs.filter(j => j.status === "running" || j.status === "queued"), [jobs]);
   const prJobs = useMemo(() => jobs.filter(j => j.pr_url), [jobs]);
-  const allJobsGreen = useMemo(() => jobs.length > 0 && greenJobs.length === jobs.length, [jobs, greenJobs]);
+  const allJobsMerged = useMemo(() => jobs.length > 0 && mergedJobs.length === jobs.length, [jobs, mergedJobs]);
   const fixPct = useMemo(() => jobs.length ? Math.round(jobs.reduce((sum, job) => sum + ({
     queued: 10,
     running: 45,
-    pr_opened: 78,
-    needs_human: 60,
-    ci_failed: 65,
-    green: 100,
+    awaiting_merge: 100,
+    needs_human: 80,
+    ci_failed: 70,
+    merged: 100,
   }[job.status] || 0), 0) / jobs.length) : 0, [jobs]);
-  const mttr = useMemo(() => { const f = greenJobs.filter(j => j.created_at && j.updated_at); if (!f.length) return null; const a = f.reduce((s, j) => s + (new Date(j.updated_at) - new Date(j.created_at)), 0) / f.length; const m = Math.round(a / 60000); return m < 60 ? `${m}m` : `${Math.round(m / 60 * 10) / 10}h` }, [greenJobs]);
   const pipe = useMemo(() => pipeStatus(detail, jobs), [detail, jobs]);
   const sev = detail ? (SEV[detail.severity] || SEV.low) : SEV.low;
   const overPct = useMemo(() => { const d = pipe.filter(s => s.status === "done").length, a = pipe.filter(s => s.status === "active").length; return Math.round(((d + a * .5) / pipe.length) * 100) }, [pipe]);
@@ -656,10 +783,10 @@ export default function App() {
   }).slice(0, 4), [serviceHealth]);
   const recoveryTone = useMemo(() => {
     if (!selChange) return { label: "System Healthy", color: C.green, pulse: false };
-    if (allJobsGreen) return { label: "Recovery Verified", color: C.green, pulse: false };
+    if (allJobsMerged) return { label: "Recovery Complete", color: C.green, pulse: false };
     if (jobs.length > 0 && prJobs.length === jobs.length) return { label: "Awaiting Merge", color: C.accent, pulse: false };
     return { label: "Recovery Active", color: C.yellow, pulse: true };
-  }, [selChange, allJobsGreen, jobs, prJobs]);
+  }, [selChange, allJobsMerged, jobs, prJobs]);
   const syncCooldownRemaining = useMemo(
     () => syncCooldownUntil ? Math.max(0, Math.ceil((syncCooldownUntil - nowMs) / 1000)) : 0,
     [syncCooldownUntil, nowMs],
@@ -707,6 +834,27 @@ export default function App() {
         </div>
         {/* Sync + status at bottom of sidebar */}
         <div style={{ padding: "12px 16px", borderTop: `1px solid ${C.border}`, marginTop: "auto" }}>
+          {demoStatus && (
+            <div style={{ marginBottom: 10, padding: "10px 12px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 9, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 700, marginBottom: 6 }}>Demo Controls</div>
+              <div style={{ fontSize: 11, color: C.textSec, lineHeight: 1.5, marginBottom: 8 }}>
+                {demoStatus.is_complete
+                  ? "Pipeline is at the final review-ready state."
+                  : `Next: ${demoStatus.next_label || "Detect contract diff"}`}
+              </div>
+              {demoStatus.current_label && (
+                <div style={{ fontSize: 10, color: C.muted, marginBottom: 8 }}>
+                  Current: {demoStatus.current_label}
+                </div>
+              )}
+              <button onClick={handleDemoAdvance} disabled={demoBusy || demoStatus.is_complete} style={{ width: "100%", background: demoBusy || demoStatus.is_complete ? C.border : C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: demoBusy || demoStatus.is_complete ? "not-allowed" : "pointer", transition: "background .2s", marginBottom: 6 }}>
+                {demoBusy ? "Working..." : demoStatus.is_complete ? "Final State Reached" : `Next Step (${Math.min((demoStatus.completed_steps || 0) + 1, demoStatus.total_steps || 0)}/${demoStatus.total_steps || 0})`}
+              </button>
+              <button onClick={handleDemoReset} disabled={demoBusy} style={{ width: "100%", background: "transparent", color: C.textSec, border: `1px solid ${C.border}`, borderRadius: 7, padding: "7px 12px", fontSize: 11, fontWeight: 600, cursor: demoBusy ? "not-allowed" : "pointer" }}>
+                Reset Demo
+              </button>
+            </div>
+          )}
           <button onClick={handleSync} disabled={syncDisabled} style={{ width: "100%", background: syncDisabled ? C.border : C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: syncDisabled ? "not-allowed" : "pointer", transition: "background .2s", marginBottom: 8 }}>{syncing ? "Syncing..." : syncCooldownRemaining > 0 ? `Sync in ${syncCooldownRemaining}s` : "Sync Now"}</button>
           {lastRef && <div style={{ fontSize: 10, color: C.muted, textAlign: "center" }}>Updated {rel(lastRef.toISOString())}</div>}
         </div>
@@ -828,7 +976,7 @@ export default function App() {
                           <Dot color={C.green} />
                           <span style={{ fontSize: 14, fontWeight: 700, color: C.green }}>System Healthy</span>
                         </div>
-                        <p style={{ margin: 0, fontSize: 12, color: C.textSec, lineHeight: 1.6 }}>No active contract changes detected. The platform is monitoring {serviceCount} services across {graph?.waves?.length || 0} dependency waves.</p>
+                        <p style={{ margin: 0, fontSize: 12, color: C.textSec, lineHeight: 1.6 }}>No active contract changes detected. The platform is monitoring {serviceCount} services across {graph?.waves?.length || 0} dependency waves. Run the propagation pipeline to detect and remediate contract changes.</p>
                         {guard && <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
                           <Badge color={C.muted}>CI: {guard.ci_required ? "ON" : "OFF"}</Badge>
                           <Badge color={C.muted}>Auto-merge: {guard.auto_merge ? "ON" : "OFF"}</Badge>
@@ -847,9 +995,16 @@ export default function App() {
                         <p style={{ margin: 0, fontSize: 12, color: C.textSec, lineHeight: 1.5, marginBottom: 8 }}>{getSummary(detail || selChange)}</p>
                         {jobs.length > 0 && (
                           <div style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr", gap: 10, alignItems: "center" }}>
-                            <Donut pct={fixPct} color={allJobsGreen ? C.green : fixPct >= 70 ? C.accent : C.yellow} size={108} stroke={10} />
-                            <Met label="MTTR" value={mttr || "n/a"} color={C.accent} />
-                            <Met label="PRs" value={prJobs.length} color={C.accent} sub={allJobsGreen ? "all verified" : `${greenJobs.length} passed`} />
+                            <Donut
+                              pct={fixPct}
+                              color={allJobsMerged ? C.green : fixPct === 100 ? C.accent : C.yellow}
+                              size={108}
+                              stroke={10}
+                              label="Automation"
+                              sub={allJobsMerged ? "Merged" : fixPct === 100 ? "Ready for merge" : "In progress"}
+                            />
+                            <Met label="Passed" value={passedJobs.length} color={passedJobs.length === jobs.length ? C.green : C.yellow} sub={`${jobs.length} repo${jobs.length !== 1 ? "s" : ""}`} />
+                            <Met label="PRs" value={prJobs.length} color={C.accent} sub={prJobs.length === jobs.length ? "all open" : `${prJobs.length}/${jobs.length} open`} />
                           </div>
                         )}
                         <div onClick={() => setActiveNav("blast")} style={{ marginTop: 8, fontSize: 10, color: C.accentLt, cursor: "pointer" }}>View details {"\u2192"}</div>
@@ -917,13 +1072,13 @@ export default function App() {
                   <div>
                     <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 700 }}>Remediation Flow</div>
                     <div style={{ fontSize: 12, color: C.textSec, marginTop: 4 }}>
-                      {jobs.length ? `${activeJobs.length} active, ${prJobs.length} PRs, ${greenJobs.length} passed` : "No remediation jobs dispatched"}
+                      {jobs.length ? `${activeJobs.length} active, ${prJobs.length} PRs, ${passedJobs.length} passed` : "No remediation jobs dispatched"}
                     </div>
                   </div>
                   {jobs.length > 0 && (
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                       <Badge color={C.accent}>{prJobs.length} PRs</Badge>
-                      <Badge color={C.green}>{greenJobs.length} green</Badge>
+                      <Badge color={C.green}>{passedJobs.length} passed</Badge>
                     </div>
                   )}
                 </div>
@@ -937,10 +1092,10 @@ export default function App() {
                       const sc = STATUS[j.status] || STATUS.queued;
                       const stages = [
                         { label: "Queued", done: true, color: C.muted },
-                        { label: "Running", done: ["running", "pr_opened", "ci_failed", "needs_human", "green"].includes(j.status), color: C.yellow },
+                        { label: "Running", done: ["running", "awaiting_merge", "ci_failed", "needs_human", "merged"].includes(j.status), color: C.yellow },
                         { label: "PR Open", done: !!j.pr_url, color: C.accent },
-                        { label: j.status === "ci_failed" ? "CI Failed" : "CI Passed", done: j.status === "green" || j.status === "ci_failed", color: j.status === "ci_failed" ? C.red : C.green, failed: j.status === "ci_failed" },
-                        { label: "Verified", done: j.status === "green", color: C.green },
+                        { label: j.status === "ci_failed" ? "CI Failed" : "CI Passed", done: j.status === "merged" || j.status === "ci_failed" || j.status === "awaiting_merge", color: j.status === "ci_failed" ? C.red : C.green, failed: j.status === "ci_failed" },
+                        { label: "Awaiting Merge", done: j.status === "awaiting_merge" || j.status === "merged", color: C.green },
                       ];
                       return (
                         <div key={j.job_id} style={{ padding: "16px 18px", background: C.surface, borderRadius: 12, border: `1px solid ${C.border}`, borderLeft: `3px solid ${sc.color}` }}>
@@ -1335,8 +1490,8 @@ export default function App() {
             const blastColor = blastSeverity === "critical" ? C.red : blastSeverity === "high" ? C.yellow : blastSeverity === "moderate" ? C.accent : C.green;
             const affectedRoutes = blast.rc || impactRows.length;
             const totalTrafficAtRisk = blast.calls;
-            const remediatedCount = greenJobs.length;
-            const unresolvedCount = blast.sc - remediatedCount;
+            const remediatedCount = passedJobs.length;
+            const unresolvedCount = Math.max(0, blast.sc - remediatedCount);
             return (
             <Panel title="Blast Radius" sub={blast.sc > 0 ? `${blastSeverity.toUpperCase()} — ${blast.sc} service${blast.sc !== 1 ? "s" : ""} in failure zone` : "All systems nominal"}>
               {!selChange ? (
@@ -1376,6 +1531,53 @@ export default function App() {
                     <Met label="Risk Score" value={((selChange.incident_risk_score || selChange.severity) || "low").toUpperCase()} color={sev.color} sub="incident severity" />
                   </div>
 
+                  {/* Pre-Merge Simulation */}
+                  {simulation && simulation.simulations?.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                        <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 600 }}>Pre-Merge Blast Radius Simulation</div>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          {simulation.high_risk > 0 && <Badge color={C.red}>{simulation.high_risk} high</Badge>}
+                          {simulation.medium_risk > 0 && <Badge color={C.yellow}>{simulation.medium_risk} med</Badge>}
+                          {simulation.safe > 0 && <Badge color={C.green}>{simulation.safe} safe</Badge>}
+                        </div>
+                      </div>
+                      <div style={{ display: "grid", gap: 6 }}>
+                        {simulation.simulations.map(sim => {
+                          const riskColor = sim.risk_level === "high" ? C.red : sim.risk_level === "medium" ? C.yellow : C.green;
+                          const barPct = Math.round(sim.risk_score * 100);
+                          return (
+                            <div key={sim.service_name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: C.surface, borderRadius: 8, border: `1px solid ${C.border}`, borderLeft: `3px solid ${riskColor}` }}>
+                              <span style={{ flex: "0 0 150px", fontSize: 13, fontWeight: 600, color: C.text }}>{sim.service_name}</span>
+                              <Badge color={riskColor} style={{ fontSize: 9, flex: "0 0 50px", textAlign: "center" }}>{sim.risk_level.toUpperCase()}</Badge>
+                              <div style={{ flex: 1, height: 6, background: C.border, borderRadius: 3, overflow: "hidden" }}>
+                                <div style={{ width: `${barPct}%`, height: "100%", borderRadius: 3, background: `linear-gradient(90deg, ${riskColor}88, ${riskColor})`, transition: "width 0.4s ease" }} />
+                              </div>
+                              <span style={{ flex: "0 0 40px", fontSize: 11, fontWeight: 600, color: riskColor, textAlign: "right" }}>{barPct}%</span>
+                              <span style={{ flex: "0 0 70px", fontSize: 10, color: C.muted, textAlign: "right" }}>{sim.breaking_issues?.length || 0} issues</span>
+                              <span style={{ flex: "0 0 60px", fontSize: 10, color: C.muted, textAlign: "right" }}>{sim.routes_affected} routes</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+                        <div style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
+                          Diff-aware + dependency-aware prediction — no code checkout required
+                        </div>
+                        {simulation.high_risk > 0 && (
+                          <button onClick={handleVerify} disabled={verifying} style={{ background: verifying ? C.border : C.red, color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11, fontWeight: 600, cursor: verifying ? "not-allowed" : "pointer", transition: "background .2s" }}>
+                            {verifying ? "Verifying..." : `Verify ${simulation.high_risk} High-Risk`}
+                          </button>
+                        )}
+                      </div>
+                      {verifyRes && (
+                        <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 6, fontSize: 11, background: verifyRes.error ? `${C.red}0a` : `${C.green}0a`, color: verifyRes.error ? C.red : C.green, border: `1px solid ${verifyRes.error ? C.red : C.green}20` }}>
+                          {verifyRes.error ? `Error: ${verifyRes.error}` : `Dispatched ${verifyRes.dispatched} Devin verification session(s)`}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Affected services */}
                   {blast.svcs.length > 0 && (
                     <div style={{ marginBottom: 14 }}>
@@ -1391,7 +1593,7 @@ export default function App() {
                           const health = serviceHealth.find(h => h.caller_service === s);
                           const errPct = health?.server_error_rate_pct ?? null;
                           const errColor = errPct === null ? C.muted : errPct >= 10 ? C.red : errPct >= 1 ? C.yellow : C.green;
-                          const isResolved = job?.status === "green";
+                          const isResolved = ["awaiting_merge", "merged"].includes(job?.status);
                           return (
                             <div key={s} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: isResolved ? `${C.green}06` : C.surface, borderRadius: 8, border: `1px solid ${isResolved ? `${C.green}25` : C.border}`, borderLeft: `3px solid ${sc?.color || C.muted}`, transition: "all .3s" }}>
                               <Dot color={sc?.color || C.muted} pulse={job?.status === "running"} />

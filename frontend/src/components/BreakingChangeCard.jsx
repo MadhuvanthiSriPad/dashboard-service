@@ -108,7 +108,7 @@ export default function BreakingChangeCard({ change }) {
   })();
 
   const remStatusColors = {
-    all_green: { color: '#22c55e', bg: 'rgba(34, 197, 94, 0.15)' },
+    all_merged: { color: '#22c55e', bg: 'rgba(34, 197, 94, 0.15)' },
     in_progress: { color: '#3b82f6', bg: 'rgba(59, 130, 246, 0.15)' },
     needs_human: { color: '#f97316', bg: 'rgba(249, 115, 22, 0.15)' },
     pending: { color: '#64748b', bg: 'rgba(100, 116, 139, 0.15)' },

@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { ArrowUpDown, Clock, Cpu } from '../icons';
+import { ArrowUpDown, Cpu } from '../icons';
 
 const STATUS_STYLES = {
   completed: { bg: 'rgba(34, 197, 94, 0.1)', color: '#22c55e', border: 'rgba(34, 197, 94, 0.3)' },
@@ -15,7 +15,6 @@ const COLUMNS = [
   { key: 'status',       label: 'Status' },
   { key: 'total_tokens', label: 'Tokens' },
   { key: 'cost',         label: 'Cost' },
-  { key: 'duration_ms',  label: 'Duration' },
 ];
 
 const styles = {
@@ -104,16 +103,6 @@ const styles = {
   },
 };
 
-function formatDuration(ms) {
-  if (!ms) return '-';
-  if (ms < 1000) return `${ms}ms`;
-  const seconds = (ms / 1000).toFixed(1);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(ms / 60000);
-  const secs = Math.round((ms % 60000) / 1000);
-  return `${minutes}m ${secs}s`;
-}
-
 function formatTokens(n) {
   if (!n) return '-';
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
@@ -171,13 +160,6 @@ export default function SessionsTable({ sessions }) {
         return formatTokens(val);
       case 'cost':
         return formatCost(val);
-      case 'duration_ms':
-        return (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <Clock size={12} color="#64748b" />
-            {formatDuration(val)}
-          </span>
-        );
       default:
         return val || '-';
     }

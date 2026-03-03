@@ -6,8 +6,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    gateway_url: str = "http://api-core:8001"
-    billing_url: str = "http://billing-service:8002"
+    gateway_url: str = "http://127.0.0.1:8001"
+    billing_url: str = "http://127.0.0.1:8002"
     api_core_api_key: str = ""
     app_name: str = "Dashboard Service"
     api_version: str = "1.0.0"
