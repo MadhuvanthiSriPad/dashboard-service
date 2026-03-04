@@ -340,9 +340,9 @@ async def contracts_guardrails(request: Request):
     return await _proxy(_client(request), f"{GATEWAY}/api/v1/contracts/guardrails")
 
 
-@app.get("/api/contracts/demo/status")
-async def contracts_demo_status(request: Request):
-    return await _proxy(_client(request), f"{GATEWAY}/api/v1/contracts/demo/status")
+@app.get("/api/contracts/sync-status")
+async def contracts_sync_status(request: Request):
+    return await _proxy(_client(request), f"{GATEWAY}/api/v1/contracts/sync-status")
 
 
 @app.get("/api/contracts/changes")
@@ -378,44 +378,6 @@ async def contracts_simulation_verify(change_id: int, request: Request):
         resp = await _client(request).post(
             f"{GATEWAY}/api/v1/contracts/changes/{change_id}/simulation/verify"
         )
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.ConnectError:
-        raise HTTPException(status_code=502, detail="Upstream unreachable")
-    except httpx.HTTPStatusError as exc:
-        try:
-            payload = exc.response.json()
-        except ValueError:
-            payload = None
-        detail = payload.get("detail") if isinstance(payload, dict) and "detail" in payload else (
-            payload if payload is not None else f"Upstream error: {exc.response.text}"
-        )
-        raise HTTPException(status_code=exc.response.status_code, detail=detail)
-
-
-@app.post("/api/contracts/demo/advance")
-async def contracts_demo_advance(request: Request):
-    try:
-        resp = await _client(request).post(f"{GATEWAY}/api/v1/contracts/demo/advance")
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.ConnectError:
-        raise HTTPException(status_code=502, detail="Upstream unreachable")
-    except httpx.HTTPStatusError as exc:
-        try:
-            payload = exc.response.json()
-        except ValueError:
-            payload = None
-        detail = payload.get("detail") if isinstance(payload, dict) and "detail" in payload else (
-            payload if payload is not None else f"Upstream error: {exc.response.text}"
-        )
-        raise HTTPException(status_code=exc.response.status_code, detail=detail)
-
-
-@app.post("/api/contracts/demo/reset")
-async def contracts_demo_reset(request: Request):
-    try:
-        resp = await _client(request).post(f"{GATEWAY}/api/v1/contracts/demo/reset")
         resp.raise_for_status()
         return resp.json()
     except httpx.ConnectError:

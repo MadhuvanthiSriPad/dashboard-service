@@ -139,31 +139,7 @@ function hasNotificationSignal(detail, jobs) {
       || statusText.includes("notification");
   }) || Boolean(detail?.notification_sent_at);
 }
-function pipeStatus(d, jobs, demoStatus) {
-  if (demoStatus?.total_steps === 3) {
-    const active = demoStatus.next_stage || demoStatus.current_stage || "detect";
-    const statusTexts = {
-      detect: d?.changed_routes?.length > 0 || d?.changed_routes_json ? "Change found" : "",
-      analyze: d?.affected_services > 0 ? `${d.affected_services} impacted` : "",
-      plan: d?.impact_sets?.length > 0 ? "Wave order ready" : "",
-      dispatch: "",
-      fix: "",
-      notify: "",
-    };
-    const order = PIPE.map(stage => stage.key);
-    return PIPE.map(stage => {
-      const stageIndex = order.indexOf(stage.key);
-      const activeIndex = order.indexOf(active);
-      if (stage.key === active) {
-        return { ...stage, status: "active", statusText: statusTexts[stage.key] || "" };
-      }
-      if (stageIndex > -1 && activeIndex > -1 && stageIndex < activeIndex) {
-        return { ...stage, status: "done", statusText: statusTexts[stage.key] || "" };
-      }
-      return { ...stage, status: "waiting", statusText: statusTexts[stage.key] || "" };
-    });
-  }
-
+function pipeStatus(d, jobs) {
   if (!d) return PIPE.map(s => ({ ...s, status: "waiting", statusText: "" }));
   const has = jobs.length > 0;
   const allG = has && jobs.every(j => j.status === "merged" || j.status === "awaiting_merge");
@@ -174,7 +150,6 @@ function pipeStatus(d, jobs, demoStatus) {
   const anyVerificationSignal = has && jobs.some(j => j.pr_url || ["awaiting_merge", "ci_failed", "needs_human", "merged"].includes(j.status));
   const notificationSent = hasNotificationSignal(d, jobs);
   const prCount = jobs.filter(j => j.pr_url).length;
-  const mergedCount = jobs.filter(j => j.status === "merged").length;
   const runningCount = jobs.filter(j => j.status === "running").length;
   const queuedCount = jobs.filter(j => j.status === "queued").length;
   // Determine single current stage from live job state.
@@ -532,12 +507,11 @@ export default function App() {
   const [changes, setChanges] = useState([]);
   const [selId, setSelId] = useState(null);
   const [detail, setDetail] = useState(null);
-  const [demoStatus, setDemoStatus] = useState(null);
-  const [demoBusy, setDemoBusy] = useState(false);
   const [graph, setGraph] = useState(null);
   const [guard, setGuard] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(null);
   const [lastRef, setLastRef] = useState(null);
   const [syncRes, setSyncRes] = useState(null);
   const [syncCooldownUntil, setSyncCooldownUntil] = useState(null);
@@ -555,17 +529,19 @@ export default function App() {
   const [verifyRes, setVerifyRes] = useState(null);
   const riskColorFor = (riskLevel) => riskLevel === "high" ? C.red : riskLevel === "medium" ? C.yellow : C.green;
 
-  async function refreshDemoStatus() {
+  async function refreshSyncStatus(signal) {
     try {
-      const r = await fetch(`${API}/contracts/demo/status`, { headers: HEADERS });
-      if (r.ok) setDemoStatus(await r.json());
-    } catch {
-      setDemoStatus(null);
+      const r = await fetch(`${API}/contracts/sync-status`, { signal, headers: HEADERS });
+      if (r.ok) setSyncStatus(await r.json());
+      else setSyncStatus(null);
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      setSyncStatus(null);
     }
   }
 
-  async function refreshContractState(preferredId = null) {
-    let nextSelectedId = preferredId ?? selId;
+  async function refreshContractState() {
+    let nextSelectedId = selId;
 
     try {
       const changesResp = await fetch(`${API}/contracts/changes`, { headers: HEADERS });
@@ -575,8 +551,6 @@ export default function App() {
           setChanges(payload);
           if (!payload.length) {
             nextSelectedId = null;
-          } else if (preferredId != null && payload.some(change => change.id === preferredId)) {
-            nextSelectedId = preferredId;
           } else if (nextSelectedId != null && payload.some(change => change.id === nextSelectedId)) {
             nextSelectedId = nextSelectedId;
           } else {
@@ -629,18 +603,10 @@ export default function App() {
     tick(); const id = setInterval(tick, POLL_MS); return () => { ac.abort(); clearInterval(id) };
   }, [selId]);
 
-  /* Demo status poll */
+  /* Sync status poll */
   useEffect(() => {
     const ac = new AbortController();
-    async function tick() {
-      try {
-        const r = await fetch(`${API}/contracts/demo/status`, { signal: ac.signal, headers: HEADERS });
-        if (r.ok) setDemoStatus(await r.json());
-      } catch (e) {
-        if (e.name === "AbortError") return;
-        setDemoStatus(null);
-      }
-    }
+    async function tick() { await refreshSyncStatus(ac.signal) }
     tick(); const id = setInterval(tick, POLL_MS); return () => { ac.abort(); clearInterval(id) };
   }, []);
 
@@ -719,8 +685,16 @@ export default function App() {
     return () => clearInterval(id);
   }, [syncCooldownUntil]);
 
+  useEffect(() => {
+    setVerifyRes(null);
+  }, [selId]);
+
   /* Sync handler */
   async function handleSync() {
+    if (!liveSyncConfigured) {
+      setSyncRes({ error: "Devin API key not configured. Live sync is unavailable." });
+      return;
+    }
     if (syncCooldownUntil && syncCooldownUntil > Date.now()) return;
     setSyncing(true); setSyncRes(null);
     try {
@@ -736,59 +710,27 @@ export default function App() {
         const err = parseSyncResponse(await sr.json().catch(() => ({})));
         setSyncRes({ error: err.message });
       }
-      await refreshContractState();
-      await refreshDemoStatus();
+      await Promise.all([refreshContractState(), refreshSyncStatus()]);
     } catch (e) { setSyncRes({ error: String(e) }) } finally { setSyncing(false) }
-  }
-
-  async function handleDemoAdvance() {
-    if (demoBusy) return;
-    setDemoBusy(true); setSyncRes(null);
-    try {
-      const r = await fetch(`${API}/contracts/demo/advance`, { method: "POST", headers: HEADERS });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setSyncRes({ error: data?.detail?.message || data?.detail || "Unable to advance demo" });
-        return;
-      }
-      setDemoStatus(data);
-      await refreshContractState(data.change_id ?? null);
-      await refreshDemoStatus();
-    } catch (e) {
-      setSyncRes({ error: String(e) });
-    } finally {
-      setDemoBusy(false);
-    }
-  }
-
-  async function handleDemoReset() {
-    if (demoBusy) return;
-    setDemoBusy(true); setSyncRes(null);
-    try {
-      const r = await fetch(`${API}/contracts/demo/reset`, { method: "POST", headers: HEADERS });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setSyncRes({ error: data?.detail?.message || data?.detail || "Unable to reset demo" });
-        return;
-      }
-      setDemoStatus(data);
-      await refreshContractState(null);
-      await refreshDemoStatus();
-    } catch (e) {
-      setSyncRes({ error: String(e) });
-    } finally {
-      setDemoBusy(false);
-    }
   }
 
   /* Verify high-risk handler */
   async function handleVerify() {
+    if (!liveSyncConfigured) {
+      setVerifyRes({ error: "Devin API key not configured. Live verification is unavailable." });
+      return;
+    }
     if (!selId || verifying) return;
     setVerifying(true); setVerifyRes(null);
     try {
       const r = await fetch(`${API}/contracts/changes/${selId}/simulation/verify`, { method: "POST", headers: HEADERS });
       const data = await r.json().catch(() => ({}));
-      if (r.ok) { setVerifyRes({ ok: true, ...data }) } else { setVerifyRes({ error: data?.detail?.message || data?.detail || "Verify failed" }) }
+      if (r.ok) {
+        setVerifyRes({ ok: true, ...data });
+        await refreshContractState();
+      } else {
+        setVerifyRes({ error: data?.detail?.message || data?.detail || "Verify failed" });
+      }
     } catch (e) { setVerifyRes({ error: String(e) }) } finally { setVerifying(false) }
   }
 
@@ -813,7 +755,7 @@ export default function App() {
     ci_failed: 70,
     merged: 100,
   }[job.status] || 0), 0) / jobs.length) : 0, [jobs]);
-  const pipe = useMemo(() => pipeStatus(detail, jobs, demoStatus), [detail, jobs, demoStatus]);
+  const pipe = useMemo(() => pipeStatus(detail, jobs), [detail, jobs]);
   const sev = detail ? (SEV[detail.severity] || SEV.low) : SEV.low;
   const overPct = useMemo(() => { const d = pipe.filter(s => s.status === "done").length, a = pipe.filter(s => s.status === "active").length; return Math.round(((d + a * .5) / pipe.length) * 100) }, [pipe]);
   const serviceCount = useMemo(() => Object.keys(graph?.services || {}).length, [graph]);
@@ -865,7 +807,25 @@ export default function App() {
     () => syncCooldownUntil ? Math.max(0, Math.ceil((syncCooldownUntil - nowMs) / 1000)) : 0,
     [syncCooldownUntil, nowMs],
   );
-  const syncDisabled = syncing || syncCooldownRemaining > 0;
+  const liveSyncConfigured = syncStatus ? Boolean(syncStatus.devin_api_configured) : true;
+  const liveReadRefreshEnabled = Boolean(syncStatus?.devin_api_configured && syncStatus?.devin_read_refresh_enabled);
+  const liveReadRefreshSeconds = Number(syncStatus?.devin_read_refresh_seconds) || (POLL_MS / 1000);
+  const liveSyncLabel = !syncStatus
+    ? "Checking live pipeline"
+    : !syncStatus.devin_api_configured
+      ? "Live sync unavailable"
+      : liveReadRefreshEnabled
+        ? `Live reads every ${liveReadRefreshSeconds}s`
+        : "Manual live sync only";
+  const liveSyncHint = !syncStatus
+    ? "Using the same contract endpoints for seeded and live records."
+    : !syncStatus.devin_api_configured
+      ? "Set the Devin API key to enable Live Sync and Verify."
+      : liveReadRefreshEnabled
+        ? "Dashboard polling will pick up current remediation state automatically."
+        : "Use Live Sync to refresh PR, CI, and session state on demand.";
+  const syncDisabled = syncing || syncCooldownRemaining > 0 || !liveSyncConfigured;
+  const verifyDisabled = verifying || !selId || simulation?.high_risk < 1 || !liveSyncConfigured;
 
   /* ═══ LOADING ═══ */
   if (loading) return (
@@ -911,28 +871,12 @@ export default function App() {
         </div>
         {/* Sync + status at bottom of sidebar */}
         <div style={{ padding: "12px 16px", borderTop: `1px solid ${C.border}`, marginTop: "auto" }}>
-          {demoStatus && (
-            <div style={{ marginBottom: 10, padding: "10px 12px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8 }}>
-              <div style={{ fontSize: 9, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 700, marginBottom: 6 }}>Demo Controls</div>
-              <div style={{ fontSize: 11, color: C.textSec, lineHeight: 1.5, marginBottom: 8 }}>
-                {demoStatus.is_complete
-                  ? "Pipeline is at the final notify stage."
-                  : `Next: ${demoStatus.next_label || "Detect contract diff"}`}
-              </div>
-              {demoStatus.current_label && (
-                <div style={{ fontSize: 10, color: C.muted, marginBottom: 8 }}>
-                  Current: {demoStatus.current_label}
-                </div>
-              )}
-              <button onClick={handleDemoAdvance} disabled={demoBusy || demoStatus.is_complete} style={{ width: "100%", background: demoBusy || demoStatus.is_complete ? C.border : C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: demoBusy || demoStatus.is_complete ? "not-allowed" : "pointer", transition: "background .2s", marginBottom: 6 }}>
-                {demoBusy ? "Working..." : demoStatus.is_complete ? "Final State Reached" : `Next Step (${Math.min((demoStatus.completed_steps || 0) + 1, demoStatus.total_steps || 0)}/${demoStatus.total_steps || 0})`}
-              </button>
-              <button onClick={handleDemoReset} disabled={demoBusy} style={{ width: "100%", background: "transparent", color: C.textSec, border: `1px solid ${C.border}`, borderRadius: 7, padding: "7px 12px", fontSize: 11, fontWeight: 600, cursor: demoBusy ? "not-allowed" : "pointer" }}>
-                Reset Demo
-              </button>
-            </div>
-          )}
-          <button onClick={handleSync} disabled={syncDisabled} style={{ width: "100%", background: syncDisabled ? C.border : C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: syncDisabled ? "not-allowed" : "pointer", transition: "background .2s", marginBottom: 8 }}>{syncing ? "Syncing..." : syncCooldownRemaining > 0 ? `Sync in ${syncCooldownRemaining}s` : "Sync Now"}</button>
+          <div style={{ marginBottom: 10, padding: "10px 12px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8 }}>
+            <div style={{ fontSize: 9, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 700, marginBottom: 6 }}>Live Pipeline</div>
+            <div style={{ fontSize: 11, color: liveSyncConfigured ? (liveReadRefreshEnabled ? C.green : C.yellow) : C.red, fontWeight: 600, marginBottom: 5 }}>{liveSyncLabel}</div>
+            <div style={{ fontSize: 10, color: C.textSec, lineHeight: 1.5 }}>{liveSyncHint}</div>
+          </div>
+          <button onClick={handleSync} disabled={syncDisabled} style={{ width: "100%", background: syncDisabled ? C.border : C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: syncDisabled ? "not-allowed" : "pointer", transition: "background .2s", marginBottom: 8 }}>{syncing ? "Syncing..." : syncCooldownRemaining > 0 ? `Live Sync in ${syncCooldownRemaining}s` : liveSyncConfigured ? "Live Sync" : "Live Sync Unavailable"}</button>
           {lastRef && <div style={{ fontSize: 10, color: C.muted, textAlign: "center" }}>Updated {rel(lastRef.toISOString())}</div>}
         </div>
       </nav>
@@ -1124,7 +1068,7 @@ export default function App() {
           )}
 
           {/* ═══ SERVICE TOPOLOGY ═══ */}
-          {(activeNav === "topology" || activeNav === "jobs") && (
+          {activeNav === "topology" && (
             <Panel title="Service Dependency Graph" sub={graph?.waves ? `${graph.waves.length} waves \u00B7 ${serviceCount} services \u00B7 ${(graph.edges || []).length} edges` : "Loading service graph..."}>
               <WaveGraph graph={graph} jobs={jobs} serviceHealth={serviceHealth} />
               {graph?.waves?.length > 0 && (
@@ -1643,11 +1587,16 @@ export default function App() {
                           Diff-aware + dependency-aware prediction — no code checkout required
                         </div>
                         {simulation.high_risk > 0 && (
-                          <button onClick={handleVerify} disabled={verifying} style={{ background: verifying ? C.border : C.red, color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11, fontWeight: 600, cursor: verifying ? "not-allowed" : "pointer", transition: "background .2s" }}>
-                            {verifying ? "Verifying..." : `Verify ${simulation.high_risk} High-Risk`}
+                          <button onClick={handleVerify} disabled={verifyDisabled} title={liveSyncConfigured ? undefined : "Configure the Devin API key to enable verification"} style={{ background: verifyDisabled ? C.border : C.red, color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11, fontWeight: 600, cursor: verifyDisabled ? "not-allowed" : "pointer", transition: "background .2s" }}>
+                            {verifying ? "Verifying..." : liveSyncConfigured ? `Verify ${simulation.high_risk} High-Risk` : "Verify Unavailable"}
                           </button>
                         )}
                       </div>
+                      {simulation.high_risk > 0 && !liveSyncConfigured && (
+                        <div style={{ marginTop: 6, fontSize: 10, color: C.muted }}>
+                          Configure the Devin API key to run live verification.
+                        </div>
+                      )}
                       {verifyRes && (
                         <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 6, fontSize: 11, background: verifyRes.error ? `${C.red}0a` : `${C.green}0a`, color: verifyRes.error ? C.red : C.green, border: `1px solid ${verifyRes.error ? C.red : C.green}20` }}>
                           {verifyRes.error ? `Error: ${verifyRes.error}` : `Dispatched ${verifyRes.dispatched} Devin verification session(s)`}

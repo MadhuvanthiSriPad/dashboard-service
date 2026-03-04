@@ -1,6 +1,6 @@
 # Dashboard Service
 
-`dashboard-service` is the backend-for-frontend for the demo dashboard. It proxies data from `api-core` and `billing-service`, reshapes it for the UI, and can serve the built React frontend.
+`dashboard-service` is the backend-for-frontend for the platform dashboard. It proxies data from `api-core` and `billing-service`, reshapes it for the UI, and can serve the built React frontend.
 
 ## What It Handles
 

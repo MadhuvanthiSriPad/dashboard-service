@@ -99,6 +99,14 @@ def mock_client():
             return _mock_response(MOCK_SESSIONS)
         if "/api/v1/analytics/cost-by-team" in url:
             return _mock_response(MOCK_COST_BY_TEAM)
+        if "/api/v1/contracts/sync-status" in url:
+            return _mock_response({
+                "devin_sync_enabled": True,
+                "interval_seconds": 45,
+                "devin_api_configured": True,
+                "devin_read_refresh_enabled": True,
+                "devin_read_refresh_seconds": 10,
+            })
         if "/api/v1/billing/summary" in url:
             return _mock_response(MOCK_BILLING_SUMMARY)
         if "/api/v1/teams" in url:
@@ -257,22 +265,21 @@ async def test_live_jobs_sync_preserves_cooldown_payload(transport):
 
 
 @pytest.mark.asyncio
-async def test_demo_status_proxy(transport):
+async def test_sync_status_proxy(transport):
     client = AsyncMock(spec=httpx.AsyncClient)
     client.get = AsyncMock(return_value=_mock_response({
-        "change_id": 1,
-        "current_stage": "dispatch",
-        "current_label": "Queue remediation jobs",
-        "next_stage": "running",
-        "next_label": "Launch Devin sessions",
-        "completed_steps": 3,
-        "total_steps": 7,
-        "is_complete": False,
+        "devin_sync_enabled": True,
+        "interval_seconds": 45,
+        "devin_api_configured": True,
+        "devin_read_refresh_enabled": True,
+        "devin_read_refresh_seconds": 10,
     }))
     app.state.http_client = client
 
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.get("/api/contracts/demo/status")
+        resp = await ac.get("/api/contracts/sync-status")
 
     assert resp.status_code == 200
-    assert resp.json()["next_stage"] == "running"
+    payload = resp.json()
+    assert payload["devin_api_configured"] is True
+    assert payload["devin_read_refresh_seconds"] == 10
