@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
+    service_name: str = "dashboard-service"
     gateway_url: str = "http://127.0.0.1:8001"
     billing_url: str = "http://127.0.0.1:8002"
     api_core_api_key: str = ""

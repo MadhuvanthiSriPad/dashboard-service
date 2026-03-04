@@ -114,7 +114,7 @@ function formatCost(c) {
   return `$${c.toFixed(4)}`;
 }
 
-export default function SessionsTable({ sessions }) {
+export default function SessionsTable({ sessions, onSelectSession }) {
   const [sortKey, setSortKey] = useState('cost');
   const [sortDir, setSortDir] = useState('desc');
 
@@ -201,7 +201,8 @@ export default function SessionsTable({ sessions }) {
             {sorted.map((session) => (
               <tr
                 key={session.id}
-                style={styles.row}
+                style={{ ...styles.row, cursor: onSelectSession ? 'pointer' : 'default' }}
+                onClick={onSelectSession ? () => onSelectSession(session) : undefined}
                 onMouseEnter={(e) => (e.currentTarget.style.background = '#1e2030')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
               >

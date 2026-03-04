@@ -25,7 +25,7 @@ BILLING = settings.billing_url
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the httpx async client lifecycle."""
-    headers = {"X-Caller-Service": "dashboard-service"}
+    headers = {"X-Caller-Service": settings.service_name}
     if settings.api_core_api_key:
         headers["X-API-Key"] = settings.api_core_api_key
     app.state.http_client = httpx.AsyncClient(
@@ -114,7 +114,7 @@ def _transform_session(s: dict, team_names: dict[str, dict]) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "dashboard-service"}
+    return {"status": "healthy", "service": settings.service_name}
 
 
 # ── Aggregated dashboard ─────────────────────────────────────────────────────
@@ -468,6 +468,8 @@ async def contracts_live_jobs_sync(
 
 # ── Static file serving (production) ────────────────────────────────────────
 
-static_dir = Path(__file__).resolve().parent.parent / "static"
+project_root = Path(__file__).resolve().parent.parent
+frontend_dist_dir = project_root / "frontend" / "dist"
+static_dir = frontend_dist_dir if frontend_dist_dir.is_dir() else project_root / "static"
 if static_dir.is_dir():
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")

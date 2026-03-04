@@ -5,7 +5,7 @@ import {
   AlertCircle, Loader2, Clock,
 } from '../icons';
 
-const DEVIN_APP_BASE = 'https://app.devin.ai';
+const DEVIN_APP_BASE = import.meta.env.VITE_DEVIN_APP_BASE || 'https://app.devin.ai';
 
 const severityConfig = {
   critical: { color: '#ef4444', bg: 'rgba(239,68,68,0.12)', border: 'rgba(239,68,68,0.35)', label: 'CRITICAL' },

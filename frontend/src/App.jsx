@@ -103,6 +103,17 @@ function blastInfo(detail, selChange, routes) {
   return { sc, rc, calls, svcs, repos };
 }
 function rn(u) { if (!u) return "unknown"; return u.replace(/\.git$/, "").split("/").pop() || "unknown" }
+function normalizeExternalHref(raw) {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith("github.com/")) return `https://${value}`;
+  if (value.includes("/") && !value.includes(" ") && value.split("/").length === 2) {
+    return `https://github.com/${value.replace(/\.git$/, "")}`;
+  }
+  return null;
+}
 function rel(iso) { if (!iso) return ""; const ms = Date.now() - new Date(iso).getTime(); if (ms < 0) return "now"; const s = Math.floor(ms / 1000); if (s < 60) return `${s}s ago`; const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`; const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`; return `${Math.floor(h / 24)}d ago` }
 function fmt(iso) { if (!iso) return "n/a"; return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) }
 function jobFor(jobs, g, svc) { if (!g?.services?.[svc]) return null; const repo = g.services[svc].repo; return jobs.find(j => j.target_repo === repo || rn(j.target_repo) === svc) || null }
@@ -128,7 +139,31 @@ function hasNotificationSignal(detail, jobs) {
       || statusText.includes("notification");
   }) || Boolean(detail?.notification_sent_at);
 }
-function pipeStatus(d, jobs) {
+function pipeStatus(d, jobs, demoStatus) {
+  if (demoStatus?.total_steps === 3) {
+    const active = demoStatus.next_stage || demoStatus.current_stage || "detect";
+    const statusTexts = {
+      detect: d?.changed_routes?.length > 0 || d?.changed_routes_json ? "Change found" : "",
+      analyze: d?.affected_services > 0 ? `${d.affected_services} impacted` : "",
+      plan: d?.impact_sets?.length > 0 ? "Wave order ready" : "",
+      dispatch: "",
+      fix: "",
+      notify: "",
+    };
+    const order = PIPE.map(stage => stage.key);
+    return PIPE.map(stage => {
+      const stageIndex = order.indexOf(stage.key);
+      const activeIndex = order.indexOf(active);
+      if (stage.key === active) {
+        return { ...stage, status: "active", statusText: statusTexts[stage.key] || "" };
+      }
+      if (stageIndex > -1 && activeIndex > -1 && stageIndex < activeIndex) {
+        return { ...stage, status: "done", statusText: statusTexts[stage.key] || "" };
+      }
+      return { ...stage, status: "waiting", statusText: statusTexts[stage.key] || "" };
+    });
+  }
+
   if (!d) return PIPE.map(s => ({ ...s, status: "waiting", statusText: "" }));
   const has = jobs.length > 0;
   const allG = has && jobs.every(j => j.status === "merged" || j.status === "awaiting_merge");
@@ -154,7 +189,7 @@ function pipeStatus(d, jobs) {
   const statusTexts = {
     detect: d?.changed_routes?.length > 0 || d?.changed_routes_json ? "Change found" : d ? "Detected" : "",
     analyze: d?.affected_services > 0 ? `${d.affected_services} impacted` : "",
-    plan: d?.impact_sets?.length > 0 ? `${d.impact_sets.length} wave${d.impact_sets.length !== 1 ? "s" : ""}` : "",
+    plan: d?.impact_sets?.length > 0 ? "Wave order ready" : "",
     dispatch: has ? `${jobs.length} job${jobs.length !== 1 ? "s" : ""} launched` : "",
     fix: has
       ? (anyRunning ? `${runningCount} running` : anyQueued ? `${queuedCount} queued` : allG ? "Code changes" : anyNeedsHuman ? "Needs review" : anyCIFailed ? "CI failed" : prCount > 0 ? `${prCount} PR${prCount !== 1 ? "s" : ""} open` : "")
@@ -214,6 +249,28 @@ function SectionCard({ title, sub, children, right }) {
 function Badge({ color, children, style: x }) {
   return <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: `${color}15`, color, border: `1px solid ${color}35`, borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", ...x }}>{children}</span>;
 }
+function TextButton({ children, onClick, style, disabled = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        background: "none",
+        border: "none",
+        padding: 0,
+        margin: 0,
+        color: "inherit",
+        font: "inherit",
+        textAlign: "inherit",
+        cursor: disabled ? "not-allowed" : "pointer",
+        ...style,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
 function Met({ label, value, color, sub }) {
   return (
     <div style={{ padding: "10px 12px", background: C.surface, borderRadius: 8, border: `1px solid ${C.border}`, position: "relative", overflow: "hidden" }}>
@@ -225,7 +282,11 @@ function Met({ label, value, color, sub }) {
   );
 }
 function Dot({ color, pulse: p }) { return <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0, boxShadow: `0 0 6px ${color}60`, animation: p ? "pulse 2s infinite" : "none" }} /> }
-function ExtL({ href, children }) { if (!href) return null; return <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: C.accentLt, textDecoration: "none", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4, borderBottom: `1px dashed ${C.accentLt}40` }}>{children}<span style={{ fontSize: 9 }}>{"\u2197"}</span></a> }
+function ExtL({ href, children }) {
+  const normalized = normalizeExternalHref(href);
+  if (!normalized) return null;
+  return <a href={normalized} target="_blank" rel="noopener noreferrer" style={{ color: C.accentLt, textDecoration: "none", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4, borderBottom: `1px dashed ${C.accentLt}40` }}>{children}<span style={{ fontSize: 9 }}>{"\u2197"}</span></a>;
+}
 function NoData({ msg }) { return <div style={{ padding: "24px 0", textAlign: "center", color: C.muted, fontSize: 13 }}>{msg || "No data available yet"}</div> }
 function MeterBar({ value, color = C.accent }) {
   const pct = Math.max(0, Math.min(100, Number(value) || 0));
@@ -395,6 +456,9 @@ function WaveGraph({ graph, jobs, serviceHealth = [] }) {
                 if (!p) return null;
                 const info = graph.services?.[svc];
                 const job = jobFor(jobs, graph, svc);
+                const repoHref = normalizeExternalHref(info?.repo);
+                const prHref = normalizeExternalHref(job?.pr_url);
+                const devinHref = normalizeExternalHref(job?.devin_session_url);
                 const sc = job ? (STATUS[job.status] || STATUS.queued) : null;
                 const svcHealth = serviceHealth.find(h => h.caller_service === svc);
                 const healthColor = svcHealth ? (svcHealth.server_error_rate_pct >= 10 ? C.red : svcHealth.server_error_rate_pct >= 1 ? C.yellow : C.green) : null;
@@ -430,19 +494,24 @@ function WaveGraph({ graph, jobs, serviceHealth = [] }) {
                     </text>
 
                     {/* PR / Devin links as small labels */}
-                    {job?.pr_url && (
-                      <a href={job.pr_url} target="_blank" rel="noopener noreferrer">
+                    {prHref && (
+                      <a href={prHref} target="_blank" rel="noopener noreferrer">
                         <text x={p.x + NODE_W - 12} y={p.y + 44} fill={C.accentLt} fontSize="9" fontFamily={MONO} textAnchor="end" textDecoration="underline">PR \u2197</text>
                       </a>
                     )}
-                    {job?.devin_session_url && !job?.pr_url && (
-                      <a href={job.devin_session_url} target="_blank" rel="noopener noreferrer">
+                    {devinHref && !prHref && (
+                      <a href={devinHref} target="_blank" rel="noopener noreferrer">
                         <text x={p.x + NODE_W - 12} y={p.y + 44} fill={C.accentLt} fontSize="9" fontFamily={MONO} textAnchor="end" textDecoration="underline">Devin \u2197</text>
                       </a>
                     )}
-                    {job?.devin_session_url && job?.pr_url && (
-                      <a href={job.devin_session_url} target="_blank" rel="noopener noreferrer">
+                    {devinHref && prHref && (
+                      <a href={devinHref} target="_blank" rel="noopener noreferrer">
                         <text x={p.x + NODE_W - 50} y={p.y + 56} fill={C.accentLt} fontSize="9" fontFamily={MONO} textDecoration="underline">Devin \u2197</text>
+                      </a>
+                    )}
+                    {repoHref && !prHref && !devinHref && (
+                      <a href={repoHref} target="_blank" rel="noopener noreferrer">
+                        <text x={p.x + NODE_W - 12} y={p.y + 56} fill={C.accentLt} fontSize="9" fontFamily={MONO} textAnchor="end" textDecoration="underline">Repo \u2197</text>
                       </a>
                     )}
                   </g>
@@ -484,6 +553,7 @@ export default function App() {
   const [simulation, setSimulation] = useState(null);
   const [verifying, setVerifying] = useState(false);
   const [verifyRes, setVerifyRes] = useState(null);
+  const riskColorFor = (riskLevel) => riskLevel === "high" ? C.red : riskLevel === "medium" ? C.yellow : C.green;
 
   async function refreshDemoStatus() {
     try {
@@ -733,7 +803,7 @@ export default function App() {
   const mergedJobs = useMemo(() => jobs.filter(j => j.status === "merged"), [jobs]);
   const passedJobs = useMemo(() => jobs.filter(j => ["awaiting_merge", "merged"].includes(j.status)), [jobs]);
   const activeJobs = useMemo(() => jobs.filter(j => j.status === "running" || j.status === "queued"), [jobs]);
-  const prJobs = useMemo(() => jobs.filter(j => j.pr_url), [jobs]);
+  const prJobs = useMemo(() => jobs.filter(j => j.pr_url || ["awaiting_merge", "merged"].includes(j.status)), [jobs]);
   const allJobsMerged = useMemo(() => jobs.length > 0 && mergedJobs.length === jobs.length, [jobs, mergedJobs]);
   const fixPct = useMemo(() => jobs.length ? Math.round(jobs.reduce((sum, job) => sum + ({
     queued: 10,
@@ -743,7 +813,7 @@ export default function App() {
     ci_failed: 70,
     merged: 100,
   }[job.status] || 0), 0) / jobs.length) : 0, [jobs]);
-  const pipe = useMemo(() => pipeStatus(detail, jobs), [detail, jobs]);
+  const pipe = useMemo(() => pipeStatus(detail, jobs, demoStatus), [detail, jobs, demoStatus]);
   const sev = detail ? (SEV[detail.severity] || SEV.low) : SEV.low;
   const overPct = useMemo(() => { const d = pipe.filter(s => s.status === "done").length, a = pipe.filter(s => s.status === "active").length; return Math.round(((d + a * .5) / pipe.length) * 100) }, [pipe]);
   const serviceCount = useMemo(() => Object.keys(graph?.services || {}).length, [graph]);
@@ -781,6 +851,10 @@ export default function App() {
     const scoreB = (b.server_error_rate_pct || 0) * 1000 + (b.avg_latency_ms || 0);
     return scoreB - scoreA;
   }).slice(0, 4), [serviceHealth]);
+  const simulationByService = useMemo(
+    () => Object.fromEntries((simulation?.simulations || []).map(sim => [sim.service_name, sim])),
+    [simulation],
+  );
   const recoveryTone = useMemo(() => {
     if (!selChange) return { label: "System Healthy", color: C.green, pulse: false };
     if (allJobsMerged) return { label: "Recovery Complete", color: C.green, pulse: false };
@@ -823,10 +897,13 @@ export default function App() {
               {g.items.map(item => {
                 const active = activeNav === item.id;
                 return (
-                  <div key={item.id} onClick={() => setActiveNav(item.id)}
-                    style={{ padding: "7px 16px", cursor: "pointer", background: active ? `${C.accent}10` : "transparent", borderLeft: active ? `2px solid ${C.accent}` : "2px solid transparent", transition: "all .15s" }}>
+                  <TextButton
+                    key={item.id}
+                    onClick={() => setActiveNav(item.id)}
+                    style={{ width: "100%", padding: "7px 16px", background: active ? `${C.accent}10` : "transparent", borderLeft: active ? `2px solid ${C.accent}` : "2px solid transparent", transition: "all .15s" }}
+                  >
                     <span style={{ fontSize: 12, color: active ? C.text : C.textSec, fontWeight: active ? 600 : 400 }}>{item.label}</span>
-                  </div>
+                  </TextButton>
                 );
               })}
             </div>
@@ -839,7 +916,7 @@ export default function App() {
               <div style={{ fontSize: 9, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 700, marginBottom: 6 }}>Demo Controls</div>
               <div style={{ fontSize: 11, color: C.textSec, lineHeight: 1.5, marginBottom: 8 }}>
                 {demoStatus.is_complete
-                  ? "Pipeline is at the final review-ready state."
+                  ? "Pipeline is at the final notify stage."
                   : `Next: ${demoStatus.next_label || "Detect contract diff"}`}
               </div>
               {demoStatus.current_label && (
@@ -896,9 +973,9 @@ export default function App() {
                   return (
                     <React.Fragment key={s.key}>
                       {/* Stage box */}
-                      <div onClick={() => setActiveNav("blast")} style={{
+                      <TextButton onClick={() => setActiveNav("blast")} style={{
                         flex: "1 1 0", minWidth: 0, padding: "8px 8px 10px", textAlign: "center",
-                        cursor: "pointer", transition: "all .4s ease", position: "relative",
+                        transition: "all .4s ease", position: "relative",
                         background: isDone ? `${C.green}12` : isCurrent ? `${C.yellow}15` : C.card,
                         borderRadius: 8,
                         border: `1px solid ${isDone ? `${C.green}45` : isCurrent ? `${C.yellow}55` : C.border}`,
@@ -915,7 +992,7 @@ export default function App() {
                           {isCurrent && <Dot color={pc} pulse />}
                           {s.status === "waiting" && <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.border, display: "inline-block" }} />}
                         </div>
-                      </div>
+                      </TextButton>
                       {/* SVG arrow connector */}
                       {i < pipe.length - 1 && (
                         <svg width="100%" height="40" viewBox="0 0 100 40" preserveAspectRatio="none" fill="none" style={{ flex: "0 0 clamp(18px, 2vw, 34px)", minWidth: 18, display: "block" }}>
@@ -1000,14 +1077,14 @@ export default function App() {
                               color={allJobsMerged ? C.green : fixPct === 100 ? C.accent : C.yellow}
                               size={108}
                               stroke={10}
-                              label="Automation"
-                              sub={allJobsMerged ? "Merged" : fixPct === 100 ? "Ready for merge" : "In progress"}
+                              label="Pipeline Progress"
+                              sub={allJobsMerged ? "Merged" : fixPct === 100 ? "CI passed, awaiting merge" : "Autonomous work in progress"}
                             />
                             <Met label="Passed" value={passedJobs.length} color={passedJobs.length === jobs.length ? C.green : C.yellow} sub={`${jobs.length} repo${jobs.length !== 1 ? "s" : ""}`} />
-                            <Met label="PRs" value={prJobs.length} color={C.accent} sub={prJobs.length === jobs.length ? "all open" : `${prJobs.length}/${jobs.length} open`} />
+                            <Met label="PRs" value={prJobs.length} color={C.accent} sub={`${prJobs.length}/${jobs.length} open`} />
                           </div>
                         )}
-                        <div onClick={() => setActiveNav("blast")} style={{ marginTop: 8, fontSize: 10, color: C.accentLt, cursor: "pointer" }}>View details {"\u2192"}</div>
+                        <TextButton onClick={() => setActiveNav("blast")} style={{ marginTop: 8, fontSize: 10, color: C.accentLt }}>View details {"\u2192"}</TextButton>
                       </div>
                     )}
                   </div>
@@ -1018,7 +1095,7 @@ export default function App() {
                   <div style={{ background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, padding: "14px 18px" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                       <div style={{ fontSize: 9, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 700 }}>Top Routes</div>
-                      <span onClick={() => setActiveNav("traffic-health")} style={{ fontSize: 10, color: C.accentLt, cursor: "pointer" }}>View all {"\u2192"}</span>
+                      <TextButton onClick={() => setActiveNav("traffic-health")} style={{ fontSize: 10, color: C.accentLt }}>View all {"\u2192"}</TextButton>
                     </div>
                     {topRoutes.length === 0 ? <NoData msg="No traffic data yet" /> : topRoutes.slice(0, 3).map((r, i) => (
                       <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: i < 2 ? `1px solid ${C.border}` : "none" }}>
@@ -1031,7 +1108,7 @@ export default function App() {
                   <div style={{ background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, padding: "14px 18px" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                       <div style={{ fontSize: 9, color: C.muted, textTransform: "uppercase", letterSpacing: ".8px", fontWeight: 700 }}>Top Callers</div>
-                      <span onClick={() => setActiveNav("traffic-health")} style={{ fontSize: 10, color: C.accentLt, cursor: "pointer" }}>View all {"\u2192"}</span>
+                      <TextButton onClick={() => setActiveNav("traffic-health")} style={{ fontSize: 10, color: C.accentLt }}>View all {"\u2192"}</TextButton>
                     </div>
                     {topCallers.length === 0 ? <NoData msg="No caller data yet" /> : topCallers.slice(0, 3).map((c, i) => (
                       <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: i < 2 ? `1px solid ${C.border}` : "none" }}>
@@ -1120,6 +1197,7 @@ export default function App() {
                             ))}
                           </div>
                           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12, alignItems: "center" }}>
+                            {j.target_repo && <ExtL href={j.target_repo}>Repository</ExtL>}
                             {j.devin_session_url && <ExtL href={j.devin_session_url}>Devin Session</ExtL>}
                             {j.pr_url && <ExtL href={j.pr_url}>Pull Request</ExtL>}
                             {j.is_dry_run && <Badge color={C.yellow} style={{ fontSize: 10 }}>DRY RUN</Badge>}
@@ -1544,7 +1622,7 @@ export default function App() {
                       </div>
                       <div style={{ display: "grid", gap: 6 }}>
                         {simulation.simulations.map(sim => {
-                          const riskColor = sim.risk_level === "high" ? C.red : sim.risk_level === "medium" ? C.yellow : C.green;
+                          const riskColor = riskColorFor(sim.risk_level);
                           const barPct = Math.round(sim.risk_score * 100);
                           return (
                             <div key={sim.service_name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: C.surface, borderRadius: 8, border: `1px solid ${C.border}`, borderLeft: `3px solid ${riskColor}` }}>
@@ -1590,6 +1668,8 @@ export default function App() {
                           const info = graph?.services?.[s];
                           const job = jobFor(jobs, graph, s);
                           const sc = job ? (STATUS[job.status] || STATUS.queued) : null;
+                          const risk = simulationByService[s];
+                          const riskColor = riskColorFor(risk?.risk_level);
                           const health = serviceHealth.find(h => h.caller_service === s);
                           const errPct = health?.server_error_rate_pct ?? null;
                           const errColor = errPct === null ? C.muted : errPct >= 10 ? C.red : errPct >= 1 ? C.yellow : C.green;
@@ -1599,10 +1679,12 @@ export default function App() {
                               <Dot color={sc?.color || C.muted} pulse={job?.status === "running"} />
                               <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{s}</span>
                               {info?.language && <Badge color={C.muted} style={{ fontSize: 9 }}>{info.language}</Badge>}
+                              {risk && <Badge color={riskColor} style={{ fontSize: 9 }}>{risk.risk_level.toUpperCase()}</Badge>}
                               {sc && <Badge color={sc.color}>{sc.label}</Badge>}
                               {health && <Badge color={errColor} style={{ fontSize: 9 }}>{errPct.toFixed(1)}% err</Badge>}
                               {health && <span style={{ fontSize: 10, color: C.muted }}>avg {health.avg_latency_ms.toFixed(0)}ms</span>}
                               {health && <span style={{ fontSize: 10, color: C.muted }}>{rel(health.last_seen)}</span>}
+                              {job?.target_repo && <ExtL href={job.target_repo}>Repo</ExtL>}
                               {job?.pr_url && <ExtL href={job.pr_url}>PR</ExtL>}
                               {job?.devin_session_url && <ExtL href={job.devin_session_url}>Devin</ExtL>}
                             </div>
@@ -1613,7 +1695,12 @@ export default function App() {
                   )}
                   {blast.repos.length > 0 && (
                     <div style={{ fontSize: 11, color: C.muted }}>
-                      Target repos: {blast.repos.map(r => rn(r)).join(", ")}
+                      Target repos: {blast.repos.map((repo, index) => (
+                        <React.Fragment key={repo}>
+                          {index > 0 ? ", " : ""}
+                          <ExtL href={repo}>{rn(repo)}</ExtL>
+                        </React.Fragment>
+                      ))}
                     </div>
                   )}
                   {impactRows.length > 0 && (

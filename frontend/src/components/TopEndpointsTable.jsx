@@ -117,7 +117,7 @@ export default function TopEndpointsTable({ data, onSelectRoute }) {
             return (
               <tr
                 key={i}
-                style={styles.row}
+                style={{ ...styles.row, cursor: onSelectRoute ? 'pointer' : 'default' }}
                 onClick={() => onSelectRoute && onSelectRoute(row.route_template)}
                 onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(99, 102, 241, 0.05)')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
